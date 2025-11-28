@@ -16,6 +16,20 @@ from xml.etree import ElementTree as ET
 from typing import List, Tuple, Dict, Any
 
 
+# Note names in standard music notation
+NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+
+def midi_note_to_name(midi_note: int) -> str:
+    """
+    Convert a MIDI note number to standard music notation.
+    MIDI note 60 = C4 (middle C), note 69 = A4 (440 Hz)
+    """
+    octave = (midi_note // 12) - 1
+    note_index = midi_note % 12
+    return f"{NOTE_NAMES[note_index]}{octave}"
+
+
 def parse_path_commands(d: str) -> List[Tuple[str, List[float]]]:
     """Parse an SVG path d attribute into a list of commands with their parameters."""
     # This regex matches SVG path commands
@@ -167,6 +181,19 @@ def collect_note_on_events(data: List[List[Dict[str, Any]]]) -> List[Dict[str, A
     return note_on_events
 
 
+def add_note_names(data: List[List[Dict[str, Any]]]) -> None:
+    """
+    Add 'name' field with standard music notation to all noteOn and noteOff events.
+    Modifies the data in place.
+    """
+    for track in data:
+        for event in track:
+            if event.get('type') in ('noteOn', 'noteOff'):
+                midi_note = event.get('note')
+                if midi_note is not None:
+                    event['name'] = midi_note_to_name(midi_note)
+
+
 def add_svg_coordinates(json_file: str, svg_file: str) -> str:
     """
     Add svgX and svgY coordinates to all noteOn events.
@@ -175,6 +202,9 @@ def add_svg_coordinates(json_file: str, svg_file: str) -> str:
     # Load JSON data
     with open(json_file, 'r') as f:
         data = json.load(f)
+
+    # Add note names to all noteOn and noteOff events
+    add_note_names(data)
 
     # Collect all noteOn events
     note_on_events = collect_note_on_events(data)
