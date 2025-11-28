@@ -267,28 +267,6 @@ def build_curve_data(data, max_curves):
     return curves
 
 
-def deduplicate_curve_points(curves):
-    """
-    Remove consecutive duplicate points in each curve.
-    A point is duplicate if it has the same svgX and svgY as the previous point.
-    """
-    for curve_name, points in curves.items():
-        if len(points) <= 1:
-            continue
-
-        deduped = [points[0]]
-        for point in points[1:]:
-            last = deduped[-1]
-            # Keep point if position changed (allowing for floating point comparison)
-            if (abs(point['svgX'] - last['svgX']) > 0.001 or
-                abs(point['svgY'] - last['svgY']) > 0.001):
-                deduped.append(point)
-
-        curves[curve_name] = deduped
-
-    return curves
-
-
 def setup_collection():
     """
     Set up the 'Note Jumping Curves' collection.
@@ -362,7 +340,6 @@ def main():
     # Step 3: Build curve data
     print("\nBuilding curve data...")
     curves = build_curve_data(data, MAX_CURVES)
-    curves = deduplicate_curve_points(curves)
 
     # Print summary of curve data
     print(f"\nCurve data summary:")
