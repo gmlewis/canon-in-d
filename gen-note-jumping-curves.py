@@ -12,6 +12,7 @@ import sys
 JSON_FILE = "CanonInD.json"
 COLLECTION_NAME = "Note Jumping Curves"
 PARENT_NAME = "Note Jumping Curves Parent"
+MAX_JUMPING_CURVE_Z_OFFSET = 1.0  # Height of the arc peak between notes
 
 
 def load_json_data(filepath):
@@ -317,6 +318,101 @@ def create_parent_empty(collection):
     return empty
 
 
+def create_bezier_curves(curves, collection, parent_empty):
+    """
+    Create Blender bezier curves from the curve data.
+
+    For each curve:
+    1. Create an empty parent node named 'curve1', 'curve2', etc.
+    2. Create a bezier curve that jumps from point to point with arcs.
+    3. Each arc has a midpoint raised by MAX_JUMPING_CURVE_Z_OFFSET.
+    4. X interpolation is linear (time-based), Y is the note position.
+
+    The curve structure creates "bouncing arcs" between consecutive points.
+    """
+    curve_objects = {}
+
+    for curve_name in sorted(curves.keys(), key=lambda x: int(x.replace('curve', ''))):
+        points = curves[curve_name]
+
+        if len(points) < 2:
+            print(f"  Skipping {curve_name}: not enough points")
+            continue
+
+        # Create empty parent for this curve
+        curve_parent = bpy.data.objects.new(curve_name, None)
+        curve_parent.empty_display_type = 'PLAIN_AXES'
+        curve_parent.empty_display_size = 0.5
+        collection.objects.link(curve_parent)
+        curve_parent.parent = parent_empty
+
+        # Create the bezier curve data
+        curve_data = bpy.data.curves.new(name=f"{curve_name}_bezier", type='CURVE')
+        curve_data.dimensions = '3D'
+        curve_data.resolution_u = 12  # Smoothness of the curve
+
+        # Create a single spline for the entire curve
+        spline = curve_data.splines.new('BEZIER')
+
+        # We need points for: start, (mid, end) for each segment
+        # Total bezier points = 1 + 2 * (num_segments) = 1 + 2 * (len(points) - 1)
+        # But actually, for bouncing arcs, we want:
+        # - Each "landing" point (the note positions)
+        # - Each "peak" point (midpoint of arc, raised in Z)
+        # So: landing1, peak1, landing2, peak2, landing3, ..., landingN
+        # Total = len(points) + (len(points) - 1) = 2*len(points) - 1
+
+        num_bezier_points = 2 * len(points) - 1
+        spline.bezier_points.add(num_bezier_points - 1)  # -1 because one already exists
+
+        bezier_idx = 0
+        for i, point in enumerate(points):
+            # Landing point (on the note)
+            x = point['svgX']
+            y = point['svgY']
+            z = 0.0  # Landing points are at Z=0
+
+            bp = spline.bezier_points[bezier_idx]
+            bp.co = (x, y, z)
+
+            # Set handle types for linear X interpolation
+            # We want the curve to be smooth vertically but linear in X
+            bp.handle_left_type = 'AUTO'
+            bp.handle_right_type = 'AUTO'
+
+            bezier_idx += 1
+
+            # Add peak point between this landing and the next (if not last point)
+            if i < len(points) - 1:
+                next_point = points[i + 1]
+                # Midpoint in X and Y
+                mid_x = (point['svgX'] + next_point['svgX']) / 2.0
+                mid_y = (point['svgY'] + next_point['svgY']) / 2.0
+                mid_z = MAX_JUMPING_CURVE_Z_OFFSET  # Peak of the arc
+
+                bp_peak = spline.bezier_points[bezier_idx]
+                bp_peak.co = (mid_x, mid_y, mid_z)
+                bp_peak.handle_left_type = 'AUTO'
+                bp_peak.handle_right_type = 'AUTO'
+
+                bezier_idx += 1
+
+        # Create the curve object
+        curve_obj = bpy.data.objects.new(f"{curve_name}_curve", curve_data)
+        collection.objects.link(curve_obj)
+        curve_obj.parent = curve_parent
+
+        curve_objects[curve_name] = {
+            'parent': curve_parent,
+            'curve': curve_obj,
+            'data': curve_data
+        }
+
+        print(f"  Created {curve_name}: {len(points)} landing points, {num_bezier_points} bezier points")
+
+    return curve_objects
+
+
 def main():
     print("=" * 60)
     print("Note Jumping Curves Generator")
@@ -358,15 +454,20 @@ def main():
     print("\nCreating parent empty node...")
     parent_empty = create_parent_empty(collection)
 
+    # Step 7: Create bezier curves in Blender
+    print("\nCreating bezier curves...")
+    curve_objects = create_bezier_curves(curves, collection, parent_empty)
+
     print("\n" + "=" * 60)
-    print("Stage 2 complete!")
+    print("Stage 3 complete!")
     print(f"  - MAX_CURVES: {MAX_CURVES}")
     print(f"  - Collection: '{COLLECTION_NAME}'")
     print(f"  - Parent: '{PARENT_NAME}'")
-    print(f"  - Curves built: {len(curves)}")
+    print(f"  - Curves created: {len(curve_objects)}")
+    print(f"  - Arc height (Z offset): {MAX_JUMPING_CURVE_Z_OFFSET}")
     print("=" * 60)
 
-    return curves, collection, parent_empty
+    return curves, collection, parent_empty, curve_objects
 
 
 if __name__ == "__main__":
