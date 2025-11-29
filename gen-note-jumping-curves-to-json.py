@@ -29,9 +29,37 @@ MAX_JUMPING_CURVE_Z_OFFSET = 0.5  # Height of the arc peak between notes
 X_SCALE = 0.01   # 1 SVG pixel = 0.01 meters (1 cm)
 Y_SCALE = -0.01  # NEGATIVE to flip Y axis like Blender's SVG import
 
+# Offset to align with Blender's SVG import origin
+# These values can be tweaked to match the first note's position in the imported SVG
+# The first note in the SVG should appear at (FIRST_SVG_NOTE_X_OFFSET, FIRST_SVG_NOTE_Y_OFFSET, 0)
+# Blender's SVG import uses this formula: final_y = -svgY * scale + Y_OFFSET
+# To calculate Y_OFFSET: Y_OFFSET = first_note_blender_y - (-first_note_svg_y * Y_SCALE)
+#                        Y_OFFSET = 0.058835 - (-935.93 * -0.01) = 0.058835 - (-9.3593) = 0.058835 + 9.3593
+FIRST_SVG_NOTE_X_OFFSET = 0.035085  # X position of first note in Blender after SVG import
+FIRST_SVG_NOTE_Y_OFFSET = 0.058835  # Y position of first note in Blender after SVG import
+
+# First note SVG coordinates (from CanonInD.json) - used to calculate offsets
+FIRST_NOTE_SVG_X = 497.25
+FIRST_NOTE_SVG_Y = 935.93
+
+# Calculate the offsets to apply to all coordinates
+# offset = target_position - (svg_coord * scale)
+X_OFFSET = FIRST_SVG_NOTE_X_OFFSET - (FIRST_NOTE_SVG_X * X_SCALE)
+Y_OFFSET = FIRST_SVG_NOTE_Y_OFFSET - (FIRST_NOTE_SVG_Y * Y_SCALE)
+
 # How much to offset the final X position (for the "fly off" at end of song)
 # This is in SVG units, will be scaled by X_SCALE
 END_X_OFFSET = 500
+
+
+def svg_to_blender_x(svg_x):
+    """Convert SVG X coordinate to Blender X coordinate."""
+    return svg_x * X_SCALE + X_OFFSET
+
+
+def svg_to_blender_y(svg_y):
+    """Convert SVG Y coordinate to Blender Y coordinate."""
+    return svg_y * Y_SCALE + Y_OFFSET
 
 
 def load_json_data(filepath):
@@ -307,8 +335,8 @@ def generate_bezier_points(curves, z_offset):
 
         # Get the first landing point info for the fly-in
         first_landing = landing_points[0]
-        first_x = first_landing['svgX'] * X_SCALE
-        first_y = first_landing['svgY'] * Y_SCALE
+        first_x = svg_to_blender_x(first_landing['svgX'])
+        first_y = svg_to_blender_y(first_landing['svgY'])
 
         # Add fly-in start point (hovering at z_offset, WAY off to the left at x=-1)
         fly_in_start = {
@@ -344,8 +372,8 @@ def generate_bezier_points(curves, z_offset):
         last_added_landing = None
 
         for i, point in enumerate(landing_points):
-            current_x = point['svgX'] * X_SCALE
-            current_y = point['svgY'] * Y_SCALE
+            current_x = svg_to_blender_x(point['svgX'])
+            current_y = svg_to_blender_y(point['svgY'])
 
             # Skip this landing if it's at the exact same position as the last added landing
             # (avoids duplicate consecutive points at same x,y,z)
@@ -360,8 +388,8 @@ def generate_bezier_points(curves, z_offset):
                 mid_svg_x = (last_added_landing['svgX'] + point['svgX']) / 2.0
                 mid_svg_y = (last_added_landing['svgY'] + point['svgY']) / 2.0
                 peak = {
-                    'x': mid_svg_x * X_SCALE,
-                    'y': mid_svg_y * Y_SCALE,
+                    'x': svg_to_blender_x(mid_svg_x),
+                    'y': svg_to_blender_y(mid_svg_y),
                     'z': z_offset,
                     'type': 'peak',
                     'noteName': f"{last_added_landing['noteName']} -> {point['noteName']}",
@@ -391,8 +419,8 @@ def generate_bezier_points(curves, z_offset):
 
         # Get the last landing point info for the fly-off
         last_landing = landing_points[-1]
-        last_x = last_landing['svgX'] * X_SCALE
-        last_y = last_landing['svgY'] * Y_SCALE
+        last_x = svg_to_blender_x(last_landing['svgX'])
+        last_y = svg_to_blender_y(last_landing['svgY'])
 
         # Add arc peak between last landing and fly-off
         fly_off_peak = {
@@ -488,6 +516,10 @@ def main():
             'maxJumpingCurveZOffset': MAX_JUMPING_CURVE_Z_OFFSET,
             'xScale': X_SCALE,
             'yScale': Y_SCALE,
+            'xOffset': X_OFFSET,
+            'yOffset': Y_OFFSET,
+            'firstSvgNoteXOffset': FIRST_SVG_NOTE_X_OFFSET,
+            'firstSvgNoteYOffset': FIRST_SVG_NOTE_Y_OFFSET,
             'curveResolution': 12,
             'handleType': 'AUTO'
         },
