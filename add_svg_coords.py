@@ -4,7 +4,12 @@ Add SVG coordinates to noteOn events in a JSON file.
 
 This script reads a JSON file containing note events and an SVG file containing
 note head paths, then adds "svgX" and "svgY" fields to each noteOn event
-representing the geometric center of the corresponding SVG path element.
+representing the center of the corresponding SVG note head path.
+
+The coordinates are calculated to match Blender's SVG import behavior:
+- The path's moveto point is at the left-center of the note head ellipse
+- We add half the ellipse width (~17.35 units) to get the X center
+- The Y coordinate is already at the vertical center
 
 Usage: ./add_svg_coords.py <json_file> <svg_file>
 """
@@ -15,6 +20,10 @@ import re
 from xml.etree import ElementTree as ET
 from typing import List, Tuple, Dict, Any
 
+
+# Note head ellipse dimensions (approximate, from the SVG paths)
+# The path starts at the left edge of the ellipse
+NOTE_HEAD_HALF_WIDTH = 17.35
 
 # Note names in standard music notation
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -30,114 +39,30 @@ def midi_note_to_name(midi_note: int) -> str:
     return f"{NOTE_NAMES[note_index]}{octave}"
 
 
-def parse_path_commands(d: str) -> List[Tuple[str, List[float]]]:
-    """Parse an SVG path d attribute into a list of commands with their parameters."""
-    # This regex matches SVG path commands
-    command_re = re.compile(r'([MmLlHhVvCcSsQqTtAaZz])\s*([^MmLlHhVvCcSsQqTtAaZz]*)')
-    commands = []
-
-    for match in command_re.finditer(d):
-        cmd = match.group(1)
-        params_str = match.group(2).strip()
-
-        if params_str:
-            # Split by comma or whitespace, handling negative numbers
-            params = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', params_str)
-            params = [float(p) for p in params]
-        else:
-            params = []
-
-        commands.append((cmd, params))
-
-    return commands
-
-
-def compute_path_bounds(d: str) -> Tuple[float, float, float, float]:
-    """
-    Compute the bounding box of an SVG path.
-    Returns (min_x, min_y, max_x, max_y).
-
-    This is a simplified implementation that handles the common commands.
-    """
-    commands = parse_path_commands(d)
-
-    if not commands:
-        return (0, 0, 0, 0)
-
-    x, y = 0.0, 0.0  # Current position
-    min_x, min_y = float('inf'), float('inf')
-    max_x, max_y = float('-inf'), float('-inf')
-
-    def update_bounds(px: float, py: float):
-        nonlocal min_x, min_y, max_x, max_y
-        min_x = min(min_x, px)
-        min_y = min(min_y, py)
-        max_x = max(max_x, px)
-        max_y = max(max_y, py)
-
-    for cmd, params in commands:
-        if cmd == 'M':  # Absolute moveto
-            for i in range(0, len(params), 2):
-                x, y = params[i], params[i + 1]
-                update_bounds(x, y)
-        elif cmd == 'm':  # Relative moveto
-            for i in range(0, len(params), 2):
-                x += params[i]
-                y += params[i + 1]
-                update_bounds(x, y)
-        elif cmd == 'L':  # Absolute lineto
-            for i in range(0, len(params), 2):
-                x, y = params[i], params[i + 1]
-                update_bounds(x, y)
-        elif cmd == 'l':  # Relative lineto
-            for i in range(0, len(params), 2):
-                x += params[i]
-                y += params[i + 1]
-                update_bounds(x, y)
-        elif cmd == 'H':  # Absolute horizontal lineto
-            for p in params:
-                x = p
-                update_bounds(x, y)
-        elif cmd == 'h':  # Relative horizontal lineto
-            for p in params:
-                x += p
-                update_bounds(x, y)
-        elif cmd == 'V':  # Absolute vertical lineto
-            for p in params:
-                y = p
-                update_bounds(x, y)
-        elif cmd == 'v':  # Relative vertical lineto
-            for p in params:
-                y += p
-                update_bounds(x, y)
-        elif cmd == 'C':  # Absolute cubic bezier
-            for i in range(0, len(params), 6):
-                # Control points and end point
-                update_bounds(params[i], params[i + 1])
-                update_bounds(params[i + 2], params[i + 3])
-                x, y = params[i + 4], params[i + 5]
-                update_bounds(x, y)
-        elif cmd == 'c':  # Relative cubic bezier
-            for i in range(0, len(params), 6):
-                update_bounds(x + params[i], y + params[i + 1])
-                update_bounds(x + params[i + 2], y + params[i + 3])
-                x += params[i + 4]
-                y += params[i + 5]
-                update_bounds(x, y)
-        elif cmd in ('Z', 'z'):  # Close path
-            pass
-
-    if min_x == float('inf'):
-        return (0, 0, 0, 0)
-
-    return (min_x, min_y, max_x, max_y)
-
-
 def compute_path_center(d: str) -> Tuple[float, float]:
-    """Compute the geometric center of an SVG path."""
-    min_x, min_y, max_x, max_y = compute_path_bounds(d)
-    center_x = (min_x + max_x) / 2
-    center_y = (min_y + max_y) / 2
+    """
+    Compute the center of an SVG note head path.
+
+    The note head paths use a moveto command at the left-center of the ellipse,
+    followed by bezier curves that draw the ellipse. We extract the moveto
+    coordinates and add half the ellipse width to get the true center X.
+
+    Returns (center_x, center_y) or (None, None) if parsing fails.
+    """
+    # Parse the moveto command: "m X,Y ..." or "M X,Y ..."
+    match = re.match(r'm\s+([-\d.]+),([-\d.]+)', d, re.IGNORECASE)
+    if not match:
+        return (None, None)
+
+    start_x = float(match.group(1))
+    start_y = float(match.group(2))
+
+    # The path starts at the left edge of the ellipse
+    # Add half-width to get the X center
+    # The Y is already at the vertical center
+    center_x = start_x + NOTE_HEAD_HALF_WIDTH
+    center_y = start_y
+
     return (center_x, center_y)
 
 
@@ -145,6 +70,8 @@ def parse_svg_paths(svg_file: str) -> List[Tuple[float, float]]:
     """
     Parse all path elements from an SVG file and return their centers.
     Returns a list of (center_x, center_y) tuples, sorted by x position.
+
+    These coordinates match what Blender imports when loading the SVG.
     """
     tree = ET.parse(svg_file)
     root = tree.getroot()
@@ -160,10 +87,11 @@ def parse_svg_paths(svg_file: str) -> List[Tuple[float, float]]:
         if tag_name == 'path':
             d_attr = elem.get('d', '')
             if d_attr:
-                center = compute_path_center(d_attr)
-                centers.append(center)
+                center_x, center_y = compute_path_center(d_attr)
+                if center_x is not None:
+                    centers.append((center_x, center_y))
 
-    # Sort by X position
+    # Sort by X position (left to right = time order)
     centers.sort(key=lambda c: c[0])
     return centers
 

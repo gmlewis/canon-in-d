@@ -4,62 +4,197 @@ Standalone script to generate note jumping curve data from CanonInD.json.
 Outputs a JSON file that can be read by create-curves-from-json.py in Blender.
 
 This script runs OUTSIDE of Blender and does all the data processing.
+
+COORDINATE SYSTEM:
+This script reads the SVG file to determine the exact scale factor that
+Blender uses when importing SVG files. The formula is:
+  blender_scale = (svg_width_mm / svg_viewbox_width) / 1000
+
+Blender imports SVG with Y-axis pointing up (opposite of SVG's convention),
+so we negate the Y scale. All coordinates are calculated to match exactly
+what Blender produces when importing the SVG file.
 """
 
 import json
 import sys
 import os
+import re
+from xml.etree import ElementTree as ET
 
 # ============================================================================
 # Configuration - These values are written to the output JSON for Blender
 # ============================================================================
 INPUT_JSON_FILE = "CanonInD.json"
 OUTPUT_JSON_FILE = "note-jumping-curves.json"
+SVG_FILE = "Canon_in_D-single-svg-printing_NoteHeads.svg"
 
 # Blender scene configuration
 COLLECTION_NAME = "Note Jumping Curves"
 PARENT_NAME = "Note Jumping Curves Parent"
 MAX_JUMPING_CURVE_Z_OFFSET = 0.5  # Height of the arc peak between notes
 
-# Scale factors to convert SVG coordinates to Blender units (meters)
-# SVG coordinates are in pixels, Blender uses meters by default
-# NOTE: Y_SCALE is NEGATIVE to match Blender's SVG import behavior
-# (SVG has origin at top-left with Y increasing downward,
-#  Blender has Y increasing upward, so we negate Y)
-X_SCALE = 0.01   # 1 SVG pixel = 0.01 meters (1 cm)
-Y_SCALE = -0.01  # NEGATIVE to flip Y axis like Blender's SVG import
-
-# Offset to align with Blender's SVG import origin
-# These values can be tweaked to match the first note's position in the imported SVG
-# The first note in the SVG should appear at (FIRST_SVG_NOTE_X_OFFSET, FIRST_SVG_NOTE_Y_OFFSET, 0)
-# Blender's SVG import uses this formula: final_y = -svgY * scale + Y_OFFSET
-# To calculate Y_OFFSET: Y_OFFSET = first_note_blender_y - (-first_note_svg_y * Y_SCALE)
-#                        Y_OFFSET = 0.058835 - (-935.93 * -0.01) = 0.058835 - (-9.3593) = 0.058835 + 9.3593
-FIRST_SVG_NOTE_X_OFFSET = 0.035085  # X position of first note in Blender after SVG import
-FIRST_SVG_NOTE_Y_OFFSET = 0.058835  # Y position of first note in Blender after SVG import
-
-# First note SVG coordinates (from CanonInD.json) - used to calculate offsets
-FIRST_NOTE_SVG_X = 497.25
-FIRST_NOTE_SVG_Y = 935.93
-
-# Calculate the offsets to apply to all coordinates
-# offset = target_position - (svg_coord * scale)
-X_OFFSET = FIRST_SVG_NOTE_X_OFFSET - (FIRST_NOTE_SVG_X * X_SCALE)
-Y_OFFSET = FIRST_SVG_NOTE_Y_OFFSET - (FIRST_NOTE_SVG_Y * Y_SCALE)
+# User's scale factor applied AFTER SVG import in Blender
+# Set this to match whatever scale you apply to the imported SVG in Blender
+USER_SCALE_FACTOR = 100.0  # You scale the SVG by 100x after import
 
 # How much to offset the final X position (for the "fly off" at end of song)
-# This is in SVG units, will be scaled by X_SCALE
+# This is in SVG units, will be scaled by the computed scale factor
 END_X_OFFSET = 500
+
+# These will be computed from SVG file
+SVG_SCALE = None       # Computed from SVG viewBox and width
+X_SCALE = None         # Same as SVG_SCALE (uniform scaling)
+Y_SCALE = None         # Same as SVG_SCALE (positive, for use in formula)
+VIEWBOX_HEIGHT = None  # Height of SVG viewBox (for Y flip calculation)
+
+
+def parse_svg_dimensions(svg_file):
+    """
+    Parse the SVG file to extract viewBox and width/height.
+    Returns (viewbox_width, viewbox_height, width_mm, height_mm).
+
+    Blender's SVG importer calculates scale as:
+      scale = (width_in_mm / viewbox_width) / 1000  (to convert mm to meters)
+    """
+    try:
+        tree = ET.parse(svg_file)
+        root = tree.getroot()
+
+        # Get viewBox
+        viewbox = root.get('viewBox', '0 0 1000 1000')
+        viewbox_parts = viewbox.split()
+        viewbox_width = float(viewbox_parts[2])
+        viewbox_height = float(viewbox_parts[3])
+
+        # Get width - parse mm value
+        width_str = root.get('width', '1000mm')
+        width_match = re.match(r'([\d.]+)\s*mm', width_str)
+        if width_match:
+            width_mm = float(width_match.group(1))
+        else:
+            # Try parsing as plain number (assume mm)
+            width_mm = float(re.sub(r'[^\d.]', '', width_str))
+
+        # Get height - parse mm value
+        height_str = root.get('height', '1000mm')
+        height_match = re.match(r'([\d.]+)\s*mm', height_str)
+        if height_match:
+            height_mm = float(height_match.group(1))
+        else:
+            height_mm = float(re.sub(r'[^\d.]', '', height_str))
+
+        return viewbox_width, viewbox_height, width_mm, height_mm
+
+    except Exception as e:
+        print(f"ERROR: Failed to parse SVG file '{svg_file}': {e}", file=sys.stderr)
+        return None, None, None, None
+
+
+def compute_blender_scale(svg_file):
+    """
+    Compute the scale factor that Blender uses when importing an SVG.
+
+    Blender's formula: scale = (width_mm / viewbox_width) / 1000
+    This converts SVG units to meters.
+
+    Returns (scale, viewbox_width, viewbox_height) or None on error.
+    """
+    viewbox_width, viewbox_height, width_mm, height_mm = parse_svg_dimensions(svg_file)
+
+    if viewbox_width is None:
+        return None
+
+    # Blender's scale calculation
+    base_scale = (width_mm / viewbox_width) / 1000.0
+
+    # Apply user's additional scale factor
+    scale = base_scale * USER_SCALE_FACTOR
+
+    print(f"\nSVG Coordinate System:")
+    print(f"  viewBox: 0 0 {viewbox_width} {viewbox_height}")
+    print(f"  width: {width_mm}mm, height: {height_mm}mm")
+    print(f"  Blender base scale: {base_scale:.10f} m/unit")
+    if USER_SCALE_FACTOR != 1.0:
+        print(f"  User scale factor: {USER_SCALE_FACTOR}x")
+        print(f"  Final scale: {scale:.10f}")
+
+    return scale, viewbox_width, viewbox_height
+
+
+def extract_svg_note_centers(svg_file):
+    """
+    Extract the center coordinates of all note head paths from the SVG file.
+
+    Returns a list of (x, y) tuples sorted by X position (left to right).
+    These coordinates are in SVG units and match what Blender imports.
+
+    The note head paths are ellipses drawn with a 'm' (moveto) followed by 'c' (bezier).
+    The moveto point is at the left-center of the ellipse. We add half the ellipse
+    width (~17.35 units) to get the true center X.
+    """
+    try:
+        tree = ET.parse(svg_file)
+        root = tree.getroot()
+    except Exception as e:
+        print(f"ERROR: Failed to parse SVG file '{svg_file}': {e}", file=sys.stderr)
+        return None
+
+    centers = []
+
+    for elem in root.iter():
+        # Handle namespaced tags
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+
+        if tag == 'path':
+            d = elem.get('d', '')
+            if not d:
+                continue
+
+            # Parse the moveto command to get the path start point
+            # Format: "m X,Y c ..." or "M X,Y c ..."
+            match = re.match(r'm\s+([-\d.]+),([-\d.]+)', d, re.IGNORECASE)
+            if not match:
+                continue
+
+            start_x = float(match.group(1))
+            start_y = float(match.group(2))
+
+            # The note head ellipse is approximately 34.7 units wide
+            # The path starts at the left edge, so add half-width to get center X
+            # The Y coordinate of the start point is already at the vertical center
+            NOTE_HEAD_HALF_WIDTH = 17.35
+            center_x = start_x + NOTE_HEAD_HALF_WIDTH
+            center_y = start_y
+
+            centers.append((center_x, center_y))
+
+    # Sort by X position (left to right, which corresponds to time order)
+    centers.sort(key=lambda c: c[0])
+
+    print(f"\nExtracted {len(centers)} note head centers from SVG")
+    if centers:
+        print(f"  First: ({centers[0][0]:.2f}, {centers[0][1]:.2f})")
+        print(f"  Last:  ({centers[-1][0]:.2f}, {centers[-1][1]:.2f})")
+
+    return centers
 
 
 def svg_to_blender_x(svg_x):
     """Convert SVG X coordinate to Blender X coordinate."""
-    return svg_x * X_SCALE + X_OFFSET
+    return svg_x * X_SCALE
 
 
 def svg_to_blender_y(svg_y):
-    """Convert SVG Y coordinate to Blender Y coordinate."""
-    return svg_y * Y_SCALE + Y_OFFSET
+    """
+    Convert SVG Y coordinate to Blender Y coordinate.
+
+    Blender flips the Y axis when importing SVG:
+    - SVG has Y=0 at top, increasing downward
+    - Blender has Y=0 at bottom, increasing upward
+
+    Formula: blender_y = (viewbox_height - svg_y) * scale
+    """
+    return (VIEWBOX_HEIGHT - svg_y) * Y_SCALE
 
 
 def load_json_data(filepath):
@@ -145,6 +280,48 @@ def collect_note_events(data):
     events.sort(key=lambda x: (x[0], 0 if x[1] == 'noteOff' else 1))
 
     return events
+
+
+def assign_svg_coords_to_notes(data, svg_centers):
+    """
+    Assign SVG coordinates from the extracted SVG path centers to noteOn events.
+
+    This matches noteOn events (sorted by time, then by note) with SVG path centers
+    (sorted by X position). They should have a 1-to-1 correspondence since each
+    note head in the SVG corresponds to exactly one noteOn event.
+
+    Modifies the noteOn events in place, updating their 'svgX' and 'svgY' fields.
+    Returns the number of notes matched.
+    """
+    # Collect all noteOn events with their references
+    note_on_events = []
+    for track in data:
+        if not isinstance(track, list):
+            continue
+        for event in track:
+            if isinstance(event, dict) and event.get('type') == 'noteOn':
+                note_on_events.append(event)
+
+    # Sort by time, then by note (for events at the same time)
+    note_on_events.sort(key=lambda e: (e.get('time', 0), e.get('note', 0)))
+
+    if len(note_on_events) != len(svg_centers):
+        print(f"WARNING: Note count mismatch!")
+        print(f"  noteOn events: {len(note_on_events)}")
+        print(f"  SVG note heads: {len(svg_centers)}")
+        print("  Will match as many as possible...")
+
+    # Match events to SVG centers 1-to-1
+    matched = 0
+    for i, event in enumerate(note_on_events):
+        if i < len(svg_centers):
+            svg_x, svg_y = svg_centers[i]
+            event['svgX'] = svg_x
+            event['svgY'] = svg_y
+            matched += 1
+
+    print(f"  Matched {matched} noteOn events to SVG coordinates")
+    return matched
 
 
 def build_curve_data(data, max_curves):
@@ -462,9 +639,35 @@ def generate_bezier_points(curves, z_offset):
 
 
 def main():
+    global X_SCALE, Y_SCALE, SVG_SCALE, VIEWBOX_HEIGHT
+
     print("=" * 70)
     print("Note Jumping Curves Generator (Standalone)")
     print("=" * 70)
+
+    # Step 0: Compute scale from SVG file and extract note head positions
+    print(f"\nReading SVG file '{SVG_FILE}'...")
+    result = compute_blender_scale(SVG_FILE)
+    if result is None:
+        print("ERROR: Could not parse SVG file. Aborting.")
+        return 1
+
+    scale, viewbox_width, viewbox_height = result
+    X_SCALE = scale
+    Y_SCALE = scale  # Same scale, but Y formula uses (viewbox_height - svg_y)
+    VIEWBOX_HEIGHT = viewbox_height
+    SVG_SCALE = scale  # Store for reference
+
+    print(f"  Scale = {scale:.10f}")
+    print(f"  viewBox height = {viewbox_height} (for Y flip)")
+    print(f"  Formula: blender_x = svg_x * scale")
+    print(f"  Formula: blender_y = (viewbox_height - svg_y) * scale")
+
+    # Extract note head centers from SVG
+    svg_centers = extract_svg_note_centers(SVG_FILE)
+    if svg_centers is None or len(svg_centers) == 0:
+        print("ERROR: Could not extract note positions from SVG. Aborting.")
+        return 1
 
     # Step 1: Load JSON data
     print(f"\nLoading '{INPUT_JSON_FILE}'...")
@@ -475,6 +678,10 @@ def main():
         return 1
 
     print(f"Successfully loaded JSON with {len(data)} tracks.")
+
+    # Step 1b: Assign SVG coordinates to noteOn events
+    print("\nMatching notes to SVG positions...")
+    assign_svg_coords_to_notes(data, svg_centers)
 
     # Step 2: Compute MAX_CURVES
     print("\nAnalyzing note overlaps...")
@@ -514,14 +721,14 @@ def main():
             'collectionName': COLLECTION_NAME,
             'parentName': PARENT_NAME,
             'maxJumpingCurveZOffset': MAX_JUMPING_CURVE_Z_OFFSET,
-            'xScale': X_SCALE,
-            'yScale': Y_SCALE,
-            'xOffset': X_OFFSET,
-            'yOffset': Y_OFFSET,
-            'firstSvgNoteXOffset': FIRST_SVG_NOTE_X_OFFSET,
-            'firstSvgNoteYOffset': FIRST_SVG_NOTE_Y_OFFSET,
+            'scale': SVG_SCALE,
+            'viewboxHeight': VIEWBOX_HEIGHT,
+            'userScaleFactor': USER_SCALE_FACTOR,
+            'svgFile': SVG_FILE,
             'curveResolution': 12,
-            'handleType': 'AUTO'
+            'handleType': 'AUTO',
+            '_formulaX': 'blender_x = svg_x * scale',
+            '_formulaY': 'blender_y = (viewboxHeight - svg_y) * scale'
         },
         'metadata': {
             'sourceFile': INPUT_JSON_FILE,
