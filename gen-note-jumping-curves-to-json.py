@@ -405,13 +405,13 @@ def build_curve_data(data, max_curves):
     first_events = [(t, n, e) for t, n, e in note_on_events if t == first_time]
     first_event = min(first_events, key=lambda x: x[1])[2]  # Lowest pitch
 
-    # All curves start at time -1, at the first note position
+    # All curves start at the first note position (timestamp 0.0)
     start_point = {
         'noteName': first_event.get('name', ''),
         'note': first_event.get('note', 0),
         'svgX': first_event.get('svgX', 0),
         'svgY': first_event.get('svgY', 0),
-        'timestamp': -1.0,
+        'timestamp': 0.0,
         'pointType': 'start'
     }
     for curve_name in curves:
