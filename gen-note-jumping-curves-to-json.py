@@ -168,8 +168,9 @@ def extract_svg_note_centers(svg_file):
 
             centers.append((center_x, center_y))
 
-    # Sort by X position (left to right, which corresponds to time order)
-    centers.sort(key=lambda c: c[0])
+    # Sort by X position, then by Y position
+    # For chords (same X), lower Y = higher pitch, matching notes sorted by -note
+    centers.sort(key=lambda c: (c[0], c[1]))
 
     print(f"\nExtracted {len(centers)} note head centers from SVG")
     if centers:
@@ -302,8 +303,9 @@ def assign_svg_coords_to_notes(data, svg_centers):
             if isinstance(event, dict) and event.get('type') == 'noteOn':
                 note_on_events.append(event)
 
-    # Sort by time, then by note (for events at the same time)
-    note_on_events.sort(key=lambda e: (e.get('time', 0), e.get('note', 0)))
+    # Sort by time, then by DESCENDING note (higher pitch first)
+    # This matches SVG sorting by (X, Y) where lower Y = higher pitch
+    note_on_events.sort(key=lambda e: (e.get('time', 0), -e.get('note', 0)))
 
     if len(note_on_events) != len(svg_centers):
         print(f"WARNING: Note count mismatch!")
