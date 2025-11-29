@@ -6,6 +6,22 @@ import json
 import math
 import os
 
+# Note names for MIDI note number conversion
+NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+def midi_note_to_name(note_number):
+    """
+    Convert a MIDI note number to a note name.
+
+    MIDI note 60 = C4 (middle C)
+    MIDI note 69 = A4 (concert pitch 440 Hz)
+
+    Returns a string like 'C4', 'F#5', 'Bb3', etc.
+    """
+    octave = (note_number // 12) - 1
+    note_index = note_number % 12
+    return f"{NOTE_NAMES[note_index]}{octave}"
+
 def parse_dawproject(file_path):
     with zipfile.ZipFile(file_path, 'r') as z:
         with z.open('project.xml') as f:
@@ -300,6 +316,7 @@ def main():
                                     "channel": 13, # Arbitrary
                                     "type": "noteOn",
                                     "note": key,
+                                    "name": midi_note_to_name(key),
                                     "velocity": int(vel * 127),
                                     "vel": vel,
                                     "time": time_start
@@ -311,6 +328,7 @@ def main():
                                     "channel": 13, # Arbitrary
                                     "type": "noteOff",
                                     "note": key,
+                                    "name": midi_note_to_name(key),
                                     "velocity": int(rel * 127),
                                     "rel": rel,
                                     "time": time_end
