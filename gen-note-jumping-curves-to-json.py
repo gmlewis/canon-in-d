@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""
+Standalone script to generate note jumping curve data from CanonInD.json.
+Outputs a JSON file that can be read by create-curves-from-json.py in Blender.
+
+This script runs OUTSIDE of Blender and does all the data processing.
+"""
+
+import json
+import sys
+import os
+
+# ============================================================================
+# Configuration - These values are written to the output JSON for Blender
+# ============================================================================
+INPUT_JSON_FILE = "CanonInD.json"
+OUTPUT_JSON_FILE = "note-jumping-curves.json"
+
+# Blender scene configuration
+COLLECTION_NAME = "Note Jumping Curves"
+PARENT_NAME = "Note Jumping Curves Parent"
+MAX_JUMPING_CURVE_Z_OFFSET = 1.0  # Height of the arc peak between notes
+
+# How much to offset the final X position (for the "fly off" at end of song)
+END_X_OFFSET = 500
+
+
+def load_json_data(filepath):
+    """Load and parse JSON file. Returns None on failure."""
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        return data
+    except FileNotFoundError:
+        print(f"ERROR: File '{filepath}' not found.", file=sys.stderr)
+        return None
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse JSON file '{filepath}': {e}", file=sys.stderr)
+        return None
+
+
+def compute_max_concurrent_notes(data):
+    """
+    Compute the maximum number of concurrently-playing notes.
+    Returns max_concurrent count.
+    """
+    events = []
+
+    for track in data:
+        if not isinstance(track, list):
+            continue
+
+        for event in track:
+            if not isinstance(event, dict):
+                continue
+
+            event_type = event.get('type')
+            time = event.get('time')
+
+            if time is None:
+                continue
+
+            if event_type == 'noteOn':
+                events.append((time, 1, event))
+            elif event_type == 'noteOff':
+                events.append((time, -1, event))
+
+    events.sort(key=lambda x: (x[0], x[1]))
+
+    current_count = 0
+    max_count = 0
+    max_time = 0
+
+    for time, delta, event in events:
+        current_count += delta
+        if current_count > max_count:
+            max_count = current_count
+            max_time = time
+
+    return max_count, max_time
+
+
+def collect_note_events(data):
+    """
+    Collect all noteOn and noteOff events from the JSON data.
+    Returns a list of (time, event_type, event) tuples sorted by time.
+    """
+    events = []
+
+    for track in data:
+        if not isinstance(track, list):
+            continue
+
+        for event in track:
+            if not isinstance(event, dict):
+                continue
+
+            event_type = event.get('type')
+            time = event.get('time')
+
+            if time is None:
+                continue
+
+            if event_type in ('noteOn', 'noteOff'):
+                events.append((time, event_type, event))
+
+    # Sort by time, with noteOff before noteOn at same time
+    events.sort(key=lambda x: (x[0], 0 if x[1] == 'noteOff' else 1))
+
+    return events
+
+
+def build_curve_data(data, max_curves):
+    """
+    Build the curve data dictionary based on note events.
+
+    Returns a dict: {'curve1': [...], 'curve2': [...], ...}
+    Each curve's list contains dicts: {noteName, svgX, svgY, timestamp, note, pointType}
+    """
+    events = collect_note_events(data)
+
+    if not events:
+        return {}, 0, 0
+
+    # Find the end time of the song (last noteOff time)
+    end_time = max(e[0] for e in events) + 1.0
+    start_time = min(e[0] for e in events)
+
+    # Initialize curve data structure
+    curves = {f'curve{i+1}': [] for i in range(max_curves)}
+
+    # Track which curves are currently "busy" (playing a note)
+    curve_assignments = {f'curve{i+1}': None for i in range(max_curves)}
+
+    # Track currently playing notes: note_number -> noteOn_event
+    active_notes = {}
+
+    # Find the first noteOn event
+    first_note_event = None
+    for time, event_type, event in events:
+        if event_type == 'noteOn':
+            first_note_event = event
+            break
+
+    if first_note_event is None:
+        return curves, start_time, end_time
+
+    # All curves start at time -1, jumping to the first note position
+    start_point = {
+        'noteName': first_note_event.get('name', ''),
+        'note': first_note_event.get('note', 0),
+        'svgX': first_note_event.get('svgX', 0),
+        'svgY': first_note_event.get('svgY', 0),
+        'timestamp': -1.0,
+        'pointType': 'start'
+    }
+    for curve_name in curves:
+        curves[curve_name].append(start_point.copy())
+
+    # Process events in time order
+    i = 0
+    while i < len(events):
+        current_time = events[i][0]
+
+        # Collect all events at this timestamp
+        events_at_time = []
+        while i < len(events) and events[i][0] == current_time:
+            events_at_time.append(events[i])
+            i += 1
+
+        # Separate noteOff and noteOn events
+        note_offs = [(t, et, e) for t, et, e in events_at_time if et == 'noteOff']
+        note_ons = [(t, et, e) for t, et, e in events_at_time if et == 'noteOn']
+
+        # Process noteOff events first - free up curves
+        for time, event_type, event in note_offs:
+            note_num = event.get('note')
+            if note_num in active_notes:
+                del active_notes[note_num]
+
+            for curve_name, assignment in curve_assignments.items():
+                if assignment is not None and assignment[0] == note_num:
+                    curve_assignments[curve_name] = None
+                    break
+
+        # Process noteOn events - assign curves to notes
+        for time, event_type, event in note_ons:
+            note_num = event.get('note')
+            active_notes[note_num] = event
+
+        # Reassign all curves based on current active notes
+        sorted_active = sorted(active_notes.items(), key=lambda x: x[0])
+        curve_names = [f'curve{i+1}' for i in range(max_curves)]
+        new_assignments = {cn: None for cn in curve_names}
+
+        for idx, (note_num, note_event) in enumerate(sorted_active):
+            if idx < max_curves:
+                curve_name = curve_names[idx]
+                new_assignments[curve_name] = (note_num, note_event)
+
+        # Determine where each curve should jump to at this timestamp
+        for curve_idx, curve_name in enumerate(curve_names):
+            if new_assignments[curve_name] is not None:
+                note_num, note_event = new_assignments[curve_name]
+                point = {
+                    'noteName': note_event.get('name', ''),
+                    'note': note_event.get('note', 0),
+                    'svgX': note_event.get('svgX', 0),
+                    'svgY': note_event.get('svgY', 0),
+                    'timestamp': current_time,
+                    'pointType': 'landing'
+                }
+                curves[curve_name].append(point)
+            else:
+                # This curve is free - merge to nearest active neighbor
+                nearest_event = None
+                min_distance = float('inf')
+
+                for other_idx, other_name in enumerate(curve_names):
+                    if new_assignments[other_name] is not None:
+                        distance = abs(other_idx - curve_idx)
+                        if distance < min_distance:
+                            min_distance = distance
+                            nearest_event = new_assignments[other_name][1]
+
+                if nearest_event is not None:
+                    point = {
+                        'noteName': nearest_event.get('name', ''),
+                        'note': nearest_event.get('note', 0),
+                        'svgX': nearest_event.get('svgX', 0),
+                        'svgY': nearest_event.get('svgY', 0),
+                        'timestamp': current_time,
+                        'pointType': 'merged'
+                    }
+                    curves[curve_name].append(point)
+
+        curve_assignments = new_assignments
+
+    # All curves end at end_time, jumping off to the right
+    for curve_name in curves:
+        if curves[curve_name]:
+            last_point = curves[curve_name][-1]
+            end_point = {
+                'noteName': last_point['noteName'],
+                'note': last_point['note'],
+                'svgX': last_point['svgX'] + END_X_OFFSET,
+                'svgY': last_point['svgY'],
+                'timestamp': end_time,
+                'pointType': 'end'
+            }
+            curves[curve_name].append(end_point)
+
+    return curves, start_time, end_time
+
+
+def generate_bezier_points(curves, z_offset):
+    """
+    Generate the actual bezier control points for each curve.
+
+    For each curve, creates:
+    - Landing points (Z=0) at each note position
+    - Peak points (Z=z_offset) at midpoints between landings
+
+    Returns a dict with bezier point data ready for Blender.
+    """
+    bezier_curves = {}
+
+    for curve_name, landing_points in curves.items():
+        if len(landing_points) < 2:
+            continue
+
+        bezier_points = []
+
+        for i, point in enumerate(landing_points):
+            # Landing point (on the note, Z=0)
+            landing = {
+                'x': point['svgX'],
+                'y': point['svgY'],
+                'z': 0.0,
+                'type': 'landing',
+                'noteName': point['noteName'],
+                'note': point['note'],
+                'timestamp': point['timestamp'],
+                'pointType': point['pointType']
+            }
+            bezier_points.append(landing)
+
+            # Add peak point between this landing and the next (if not last)
+            if i < len(landing_points) - 1:
+                next_point = landing_points[i + 1]
+                peak = {
+                    'x': (point['svgX'] + next_point['svgX']) / 2.0,
+                    'y': (point['svgY'] + next_point['svgY']) / 2.0,
+                    'z': z_offset,
+                    'type': 'peak',
+                    'noteName': f"{point['noteName']} -> {next_point['noteName']}",
+                    'note': None,
+                    'timestamp': (point['timestamp'] + next_point['timestamp']) / 2.0,
+                    'pointType': 'arc_peak'
+                }
+                bezier_points.append(peak)
+
+        bezier_curves[curve_name] = {
+            'landingCount': len(landing_points),
+            'bezierPointCount': len(bezier_points),
+            'points': bezier_points
+        }
+
+    return bezier_curves
+
+
+def main():
+    print("=" * 70)
+    print("Note Jumping Curves Generator (Standalone)")
+    print("=" * 70)
+
+    # Step 1: Load JSON data
+    print(f"\nLoading '{INPUT_JSON_FILE}'...")
+    data = load_json_data(INPUT_JSON_FILE)
+
+    if data is None:
+        print("Aborting due to JSON load failure.")
+        return 1
+
+    print(f"Successfully loaded JSON with {len(data)} tracks.")
+
+    # Step 2: Compute MAX_CURVES
+    print("\nAnalyzing note overlaps...")
+    max_curves, max_time = compute_max_concurrent_notes(data)
+    print(f"MAX_CURVES = {max_curves} (maximum concurrent notes)")
+    print(f"  Peak concurrency occurs at time {max_time:.2f}s")
+
+    # Step 3: Build curve data
+    print("\nBuilding curve data...")
+    curves, start_time, end_time = build_curve_data(data, max_curves)
+
+    # Print summary
+    print(f"\nCurve data summary:")
+    print(f"  Song duration: {start_time:.2f}s to {end_time - 1:.2f}s")
+    total_points = 0
+    for curve_name in sorted(curves.keys(), key=lambda x: int(x.replace('curve', ''))):
+        points = curves[curve_name]
+        total_points += len(points)
+        print(f"  {curve_name}: {len(points)} landing points")
+        if points:
+            print(f"    First: t={points[0]['timestamp']:.2f}s, note={points[0]['noteName']} ({points[0]['note']})")
+            print(f"    Last:  t={points[-1]['timestamp']:.2f}s, note={points[-1]['noteName']} ({points[-1]['note']})")
+
+    print(f"\n  Total landing points across all curves: {total_points}")
+
+    # Step 4: Generate bezier control points
+    print("\nGenerating bezier control points...")
+    bezier_curves = generate_bezier_points(curves, MAX_JUMPING_CURVE_Z_OFFSET)
+
+    total_bezier = sum(c['bezierPointCount'] for c in bezier_curves.values())
+    print(f"  Total bezier points: {total_bezier}")
+
+    # Step 5: Build output JSON
+    output = {
+        '_comment': 'Generated by gen-note-jumping-curves-to-json.py - edit values below to customize',
+        'config': {
+            'collectionName': COLLECTION_NAME,
+            'parentName': PARENT_NAME,
+            'maxJumpingCurveZOffset': MAX_JUMPING_CURVE_Z_OFFSET,
+            'curveResolution': 12,
+            'handleType': 'AUTO'
+        },
+        'metadata': {
+            'sourceFile': INPUT_JSON_FILE,
+            'maxConcurrentNotes': max_curves,
+            'peakConcurrencyTime': max_time,
+            'songStartTime': start_time,
+            'songEndTime': end_time - 1,
+            'totalLandingPoints': total_points,
+            'totalBezierPoints': total_bezier
+        },
+        'curves': bezier_curves
+    }
+
+    # Step 6: Write output JSON
+    print(f"\nWriting output to '{OUTPUT_JSON_FILE}'...")
+    try:
+        with open(OUTPUT_JSON_FILE, 'w') as f:
+            json.dump(output, f, indent=2)
+        print(f"Successfully wrote {os.path.getsize(OUTPUT_JSON_FILE):,} bytes")
+    except Exception as e:
+        print(f"ERROR: Failed to write output file: {e}", file=sys.stderr)
+        return 1
+
+    print("\n" + "=" * 70)
+    print("Generation complete!")
+    print(f"  Output file: {OUTPUT_JSON_FILE}")
+    print(f"  Curves: {len(bezier_curves)}")
+    print(f"  Total bezier points: {total_bezier}")
+    print("\nNext step: Run 'create-curves-from-json.py' in Blender")
+    print("=" * 70)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
