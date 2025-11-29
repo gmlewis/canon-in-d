@@ -422,6 +422,10 @@ def build_curve_data(data, max_curves):
     for time, note, event in note_on_events:
         event_lookup[(time, note)] = event
 
+    # Track what note each curve was on at the previous timestamp
+    # Only add a landing if the curve's note CHANGES or if it's a new noteOn
+    prev_curve_notes = {cn: None for cn in curve_names}
+
     # Process each noteOn timestamp
     for current_time in note_on_times:
         # Find all notes that are active at this timestamp
@@ -432,9 +436,11 @@ def build_curve_data(data, max_curves):
                 active_notes.add(note_num)
 
         # Also add notes that START at this timestamp
+        notes_starting_now = set()
         for t, n, e in note_on_events:
             if t == current_time:
                 active_notes.add(n)
+                notes_starting_now.add(n)
 
         # Sort active notes by pitch (lowest first)
         sorted_notes = sorted(active_notes)
@@ -456,6 +462,17 @@ def build_curve_data(data, max_curves):
             if note_num is None:
                 continue
 
+            # Check if we should add a landing point:
+            # 1. This note just started (noteOn at this timestamp), OR
+            # 2. The curve's assigned note changed from the previous timestamp
+            prev_note = prev_curve_notes[curve_name]
+            note_just_started = note_num in notes_starting_now
+            note_changed = (prev_note != note_num)
+
+            if not note_just_started and not note_changed:
+                # Curve stays on the same sustained note - no new landing needed
+                continue
+
             # Find the event for this note at this time (or use active note's original event)
             event = event_lookup.get((current_time, note_num))
             if event is None:
@@ -468,6 +485,9 @@ def build_curve_data(data, max_curves):
 
             if event is None:
                 continue
+
+            # Update tracking
+            prev_curve_notes[curve_name] = note_num
 
             # Add landing point for this curve
             point = {
