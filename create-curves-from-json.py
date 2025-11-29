@@ -51,26 +51,25 @@ def load_curve_data(filepath):
 def prevent_curve_crossings(curves_data):
     """
     Ensure curves never cross in the X-Y plane by swapping Y values at noteOn events.
-    
+
     At every 'landing' (noteOn) event, all curves are sorted such that their Y values
     satisfy the invariant: curve1.Y <= curve2.Y <= ... <= curveN.Y
-    
-    This function modifies the curves_data in place, preserving the current curve
-    assignments (which curve a ball is on) while swapping Y positions between curves
-    to prevent crossings.
-    
+
+    This function modifies the curves_data in place by swapping Y values between curves
+    at each X position. No Y values are created or altered - only swapped between curves.
+
     Args:
         curves_data: Dict of curve data from JSON (will be modified in place)
-    
+
     Returns:
-        Number of swaps performed
+        Number of X positions where swaps were performed
     """
     curve_names = sorted(curves_data.keys(), key=lambda x: int(x.replace('curve', '')))
     num_curves = len(curve_names)
-    
+
     if num_curves < 2:
         return 0
-    
+
     # Build an index of landing points for each curve, keyed by X position
     # For each curve, create a dict: x_position -> point_index
     curve_landing_indices = {}
@@ -83,22 +82,17 @@ def prevent_curve_crossings(curves_data):
                 x_key = round(point['x'], 6)
                 landing_indices[x_key] = i
         curve_landing_indices[curve_name] = landing_indices
-    
+
     # Collect all unique X positions where landing events occur (across all curves)
     all_x_positions = set()
     for curve_name in curve_names:
         all_x_positions.update(curve_landing_indices[curve_name].keys())
-    
+
     # Sort X positions from lowest to highest
     sorted_x_positions = sorted(all_x_positions)
-    
-    # Track the current Y assignment for each curve
-    # Initially, each curve maintains its own Y values
-    # We'll track which "logical Y slot" each curve occupies
-    
-    # For each X position, we need to determine the proper Y ordering
+
     swap_count = 0
-    
+
     for x_pos in sorted_x_positions:
         # Collect all curves that have a landing at this X position
         curves_at_x = []
@@ -111,87 +105,126 @@ def prevent_curve_crossings(curves_data):
                     'point_idx': point_idx,
                     'y': point['y']
                 })
-        
+
         if len(curves_at_x) < 2:
             continue
-        
-        # Sort curves by their current Y values (ascending)
-        curves_at_x.sort(key=lambda c: c['y'])
-        
-        # Check if the curves are already in the correct order (by curve index)
-        # The invariant is: curve1.Y <= curve2.Y <= ... <= curveN.Y
-        # So curve1 should have the smallest Y, curve2 next smallest, etc.
-        
-        # Get the current Y values
-        current_y_values = [c['y'] for c in curves_at_x]
-        
-        # Get the curve indices and sort them to get expected order
-        curve_indices = [(int(c['curve_name'].replace('curve', '')), c) for c in curves_at_x]
-        curve_indices.sort(key=lambda x: x[0])  # Sort by curve number
-        
-        # Now assign Y values: smallest curve number gets smallest Y
-        # This ensures curves never cross
+
+        # Get the current Y values sorted ascending
+        current_y_values = sorted([c['y'] for c in curves_at_x])
+
+        # Get the curves sorted by curve number (curve1, curve2, etc.)
+        curves_at_x_sorted = sorted(curves_at_x, key=lambda c: int(c['curve_name'].replace('curve', '')))
+
+        # Check if swaps are needed: curve1 should have smallest Y, curve2 next, etc.
         needs_swap = False
-        for i, (curve_idx, curve_info) in enumerate(curve_indices):
-            target_y = current_y_values[i]  # i-th smallest Y value
-            if abs(curve_info['y'] - target_y) > 1e-9:
+        for i, curve_info in enumerate(curves_at_x_sorted):
+            if abs(curve_info['y'] - current_y_values[i]) > 1e-9:
                 needs_swap = True
                 break
-        
+
         if needs_swap:
-            # Perform the Y swaps
-            # Assign Y values so that lower curve numbers get lower Y values
-            for i, (curve_idx, curve_info) in enumerate(curve_indices):
-                target_y = current_y_values[i]
+            # Swap Y values: assign smallest Y to lowest curve number, etc.
+            for i, curve_info in enumerate(curves_at_x_sorted):
                 point_idx = curve_info['point_idx']
-                curves_data[curve_info['curve_name']]['points'][point_idx]['y'] = target_y
+                curves_data[curve_info['curve_name']]['points'][point_idx]['y'] = current_y_values[i]
             swap_count += 1
-    
-    # Now we need to update the peak points as well
-    # Peaks are between landings, so we need to recalculate their Y positions
-    # to ensure smooth transitions without crossings
-    update_peak_positions(curves_data)
-    
+
+    # Now swap Y values for peak points between the same curves
+    # Peaks inherit swaps from their adjacent landings
+    swap_peak_y_values(curves_data, curve_landing_indices, curve_names)
+
     return swap_count
 
 
-def update_peak_positions(curves_data):
+def swap_peak_y_values(curves_data, curve_landing_indices, curve_names):
     """
-    Update peak point Y positions to be the average of adjacent landing points.
-    This ensures smooth curves after Y value swaps.
-    
+    Swap Y values for peak points to match the swaps made at landing points.
+
+    For each peak, we look at the previous and next landing points and determine
+    what Y swaps occurred there, then apply consistent swaps to the peak.
+
     Args:
         curves_data: Dict of curve data (modified in place)
+        curve_landing_indices: Dict mapping curve names to {x_pos: point_idx}
+        curve_names: Sorted list of curve names
     """
-    for curve_name, curve_info in curves_data.items():
-        points = curve_info['points']
+    # Build a mapping of X position -> {curve_name: y_value} for all landings
+    # This represents the FINAL (post-swap) Y values at each X position
+    landing_y_by_x = {}
+    for curve_name in curve_names:
+        for x_pos, point_idx in curve_landing_indices[curve_name].items():
+            if x_pos not in landing_y_by_x:
+                landing_y_by_x[x_pos] = {}
+            landing_y_by_x[x_pos][curve_name] = curves_data[curve_name]['points'][point_idx]['y']
+
+    sorted_x_positions = sorted(landing_y_by_x.keys())
+
+    # For each curve, process its peak points
+    for curve_name in curve_names:
+        points = curves_data[curve_name]['points']
         num_points = len(points)
-        
+
         for i, point in enumerate(points):
-            if point.get('type') == 'peak':
-                # Find the adjacent landing points
-                prev_landing = None
-                next_landing = None
-                
-                # Look backwards for previous landing
-                for j in range(i - 1, -1, -1):
-                    if points[j].get('type') == 'landing':
-                        prev_landing = points[j]
+            if point.get('type') != 'peak':
+                continue
+
+            peak_x = point['x']
+
+            # Find the previous and next landing X positions for this curve
+            prev_landing_x = None
+            next_landing_x = None
+
+            for x_pos in sorted_x_positions:
+                if x_pos < peak_x:
+                    if curve_name in landing_y_by_x.get(x_pos, {}):
+                        prev_landing_x = x_pos
+                elif x_pos > peak_x:
+                    if curve_name in landing_y_by_x.get(x_pos, {}):
+                        next_landing_x = x_pos
                         break
-                
-                # Look forwards for next landing
-                for j in range(i + 1, num_points):
-                    if points[j].get('type') == 'landing':
-                        next_landing = points[j]
-                        break
-                
-                # Update Y to be the average of adjacent landings
-                if prev_landing and next_landing:
-                    point['y'] = (prev_landing['y'] + next_landing['y']) / 2
-                elif prev_landing:
-                    point['y'] = prev_landing['y']
-                elif next_landing:
-                    point['y'] = next_landing['y']
+
+            if prev_landing_x is None or next_landing_x is None:
+                continue
+
+            # Get all curves that have landings at both prev and next X positions
+            curves_at_prev = set(landing_y_by_x.get(prev_landing_x, {}).keys())
+            curves_at_next = set(landing_y_by_x.get(next_landing_x, {}).keys())
+            common_curves = curves_at_prev & curves_at_next
+
+            if len(common_curves) < 2:
+                continue
+
+            # For each curve in common_curves, find their peak between prev and next
+            # and swap Y values to maintain the same relative ordering
+            peaks_to_swap = []
+            for cn in common_curves:
+                cn_points = curves_data[cn]['points']
+                for j, p in enumerate(cn_points):
+                    if p.get('type') == 'peak':
+                        p_x = p['x']
+                        # Check if this peak is between prev_landing_x and next_landing_x
+                        if prev_landing_x < p_x < next_landing_x:
+                            # Verify it's the peak between those specific landings
+                            peaks_to_swap.append({
+                                'curve_name': cn,
+                                'point_idx': j,
+                                'y': p['y']
+                            })
+                            break
+
+            if len(peaks_to_swap) < 2:
+                continue
+
+            # Sort peaks by their current Y values
+            current_peak_y_values = sorted([p['y'] for p in peaks_to_swap])
+
+            # Sort curves by curve number
+            peaks_to_swap_sorted = sorted(peaks_to_swap, key=lambda p: int(p['curve_name'].replace('curve', '')))
+
+            # Assign Y values: smallest curve number gets smallest Y
+            for idx, peak_info in enumerate(peaks_to_swap_sorted):
+                point_idx = peak_info['point_idx']
+                curves_data[peak_info['curve_name']]['points'][point_idx]['y'] = current_peak_y_values[idx]
 
 
 def setup_collection(collection_name):
