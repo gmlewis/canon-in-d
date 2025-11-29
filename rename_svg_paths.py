@@ -134,20 +134,23 @@ def sanitize_note_name(name):
     return name
 
 
-def generate_path_id(note_name, center_x, timestamp, index):
+def generate_path_id(note_name, center_x, timestamp, index, x_padding=6):
     """
     Generate a valid, human-readable SVG path ID.
 
-    Format: note_<NoteName>_x<X>_t<Time>_<Index>
+    Format: note_x<X>_<NoteName>_t<Time>_<Index>
 
-    Example: note_Fs4_x1028_t0.90_004
+    X is placed first (after note_) and zero-padded for lexicographic sorting.
+
+    Example: note_x001028_Fs4_t0p90_004
     """
     safe_name = sanitize_note_name(note_name)
     x_int = int(round(center_x))
+    x_str = f"{x_int:0{x_padding}d}"  # Zero-pad X value
     time_str = f"{timestamp:.2f}".replace('.', 'p')  # Replace . with p for validity
     index_str = f"{index:03d}"
 
-    return f"note_{safe_name}_x{x_int}_t{time_str}_{index_str}"
+    return f"note_x{x_str}_{safe_name}_t{time_str}_{index_str}"
 
 
 def main():
@@ -182,6 +185,11 @@ def main():
         print(f"    Note events: {len(note_events)}")
         print(f"  Will match as many as possible...")
 
+    # Calculate the X padding needed to cover the full range
+    max_x = max(center_x for elem, center_x, center_y in paths_data)
+    x_padding = len(str(int(round(max_x))))
+    print(f"  Max X value: {int(round(max_x))} (using {x_padding} digit padding)")
+
     renamed_count = 0
     for i, (elem, center_x, center_y) in enumerate(paths_data):
         old_id = elem.get('id', 'no-id')
@@ -192,11 +200,13 @@ def main():
                 note['name'],
                 center_x,
                 note['time'],
-                i + 1
+                i + 1,
+                x_padding
             )
         else:
             # No matching note event - use position-based ID
-            new_id = f"note_unknown_x{int(round(center_x))}_{i + 1:03d}"
+            x_str = f"{int(round(center_x)):0{x_padding}d}"
+            new_id = f"note_x{x_str}_unknown_{i + 1:03d}"
 
         elem.set('id', new_id)
         renamed_count += 1
@@ -236,8 +246,9 @@ def main():
     print(f"  Input SVG:  {INPUT_SVG_FILE}")
     print(f"  Output SVG: {OUTPUT_SVG_FILE}")
     print(f"  Paths renamed: {renamed_count}")
-    print("\nID Format: note_<NoteName>_x<X>_t<Time>_<Index>")
-    print("  Example: note_Fs4_x1028_t0p90_004")
+    print(f"\nID Format: note_x<X>_<NoteName>_t<Time>_<Index>")
+    print(f"  X is zero-padded to {x_padding} digits for lexicographic sorting")
+    print(f"  Example: note_x001028_Fs4_t0p90_004")
     print("  (# replaced with 's', decimal point replaced with 'p')")
     print("=" * 70)
 
