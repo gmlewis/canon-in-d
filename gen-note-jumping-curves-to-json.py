@@ -23,8 +23,11 @@ MAX_JUMPING_CURVE_Z_OFFSET = 0.5  # Height of the arc peak between notes
 
 # Scale factors to convert SVG coordinates to Blender units (meters)
 # SVG coordinates are in pixels, Blender uses meters by default
-X_SCALE = 0.01  # 1 SVG pixel = 0.01 meters (1 cm)
-Y_SCALE = 0.01  # 1 SVG pixel = 0.01 meters (1 cm)
+# NOTE: Y_SCALE is NEGATIVE to match Blender's SVG import behavior
+# (SVG has origin at top-left with Y increasing downward,
+#  Blender has Y increasing upward, so we negate Y)
+X_SCALE = 0.01   # 1 SVG pixel = 0.01 meters (1 cm)
+Y_SCALE = -0.01  # NEGATIVE to flip Y axis like Blender's SVG import
 
 # How much to offset the final X position (for the "fly off" at end of song)
 # This is in SVG units, will be scaled by X_SCALE
