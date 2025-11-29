@@ -121,12 +121,51 @@ def compute_blender_scale(svg_file):
     return scale, viewbox_width, viewbox_height
 
 
+def group_by_x_tolerance(items, get_x, tolerance=15.0):
+    """
+    Group items by X position with tolerance.
+    Items within 'tolerance' X units of each other are considered the same chord.
+
+    Returns a list of groups, where each group is sorted by the average X of the group.
+    Within each group, items retain their original order.
+    """
+    if not items:
+        return []
+
+    # Sort by X first
+    sorted_items = sorted(items, key=get_x)
+
+    groups = []
+    current_group = [sorted_items[0]]
+    current_group_start_x = get_x(sorted_items[0])
+
+    for item in sorted_items[1:]:
+        item_x = get_x(item)
+        # Check if this item is within tolerance of the group's starting X
+        if item_x - current_group_start_x <= tolerance:
+            current_group.append(item)
+        else:
+            groups.append(current_group)
+            current_group = [item]
+            current_group_start_x = item_x
+
+    groups.append(current_group)
+    return groups
+
+
 def extract_svg_note_centers(svg_file):
     """
     Extract the center coordinates of all note head paths from the SVG file.
 
-    Returns a list of (x, y) tuples sorted by X position (left to right).
+    Returns a list of (x, y) tuples sorted for chord matching.
     These coordinates are in SVG units and match what Blender imports.
+
+    Sorting strategy:
+    - Group paths by X position (within tolerance) to identify chords
+    - Sort groups by their minimum X (left to right)
+    - Within each chord group, sort by Y (top to bottom = ascending Y)
+
+    This matches notes sorted by (time, descending pitch within chord).
 
     The note head paths are ellipses drawn with a 'm' (moveto) followed by 'c' (bezier).
     The moveto point is at the left-center of the ellipse. We add half the ellipse
@@ -168,16 +207,25 @@ def extract_svg_note_centers(svg_file):
 
             centers.append((center_x, center_y))
 
-    # Sort by X position, then by Y position
-    # For chords (same X), lower Y = higher pitch, matching notes sorted by -note
-    centers.sort(key=lambda c: (c[0], c[1]))
+    # Group paths by X position (within tolerance) to identify chords
+    # Tolerance of 15 units handles bass/treble alignment differences
+    chord_groups = group_by_x_tolerance(centers, lambda c: c[0], tolerance=15.0)
 
-    print(f"\nExtracted {len(centers)} note head centers from SVG")
-    if centers:
-        print(f"  First: ({centers[0][0]:.2f}, {centers[0][1]:.2f})")
-        print(f"  Last:  ({centers[-1][0]:.2f}, {centers[-1][1]:.2f})")
+    # Build final sorted list:
+    # - Groups sorted by minimum X (left to right)
+    # - Within each group, sorted by Y (ascending = top to bottom on page)
+    sorted_centers = []
+    for group in chord_groups:
+        # Sort within chord by Y (ascending Y = top to bottom = high pitch to low pitch)
+        group_sorted = sorted(group, key=lambda c: c[1])
+        sorted_centers.extend(group_sorted)
 
-    return centers
+    print(f"\nExtracted {len(sorted_centers)} note head centers from SVG")
+    if sorted_centers:
+        print(f"  First: ({sorted_centers[0][0]:.2f}, {sorted_centers[0][1]:.2f})")
+        print(f"  Last:  ({sorted_centers[-1][0]:.2f}, {sorted_centers[-1][1]:.2f})")
+
+    return sorted_centers
 
 
 def svg_to_blender_x(svg_x):
@@ -287,13 +335,15 @@ def assign_svg_coords_to_notes(data, svg_centers):
     """
     Assign SVG coordinates from the extracted SVG path centers to noteOn events.
 
-    This matches noteOn events (sorted by time, then by note) with SVG path centers
-    (sorted by X position). They should have a 1-to-1 correspondence since each
-    note head in the SVG corresponds to exactly one noteOn event.
+    This matches noteOn events with SVG path centers using chord-aware sorting:
+    - Notes grouped by timestamp, SVG paths grouped by X (within tolerance)
+    - Within each chord, matched by pitch order (high to low) = Y order (top to bottom)
 
     Modifies the noteOn events in place, updating their 'svgX' and 'svgY' fields.
     Returns the number of notes matched.
     """
+    from collections import defaultdict
+
     # Collect all noteOn events with their references
     note_on_events = []
     for track in data:
@@ -303,19 +353,30 @@ def assign_svg_coords_to_notes(data, svg_centers):
             if isinstance(event, dict) and event.get('type') == 'noteOn':
                 note_on_events.append(event)
 
-    # Sort by time, then by DESCENDING note (higher pitch first)
-    # This matches SVG sorting by (X, Y) where lower Y = higher pitch
-    note_on_events.sort(key=lambda e: (e.get('time', 0), -e.get('note', 0)))
+    # Group notes by timestamp to identify chords
+    time_groups = defaultdict(list)
+    for note in note_on_events:
+        time_groups[note.get('time', 0)].append(note)
 
-    if len(note_on_events) != len(svg_centers):
+    # Build final sorted list:
+    # - Groups sorted by time (chronological)
+    # - Within each group, sorted by DESCENDING note (higher pitch first)
+    #   This matches SVG Y order where lower Y = higher pitch
+    sorted_notes = []
+    for time in sorted(time_groups.keys()):
+        group = time_groups[time]
+        group_sorted = sorted(group, key=lambda n: -n.get('note', 0))  # Descending pitch
+        sorted_notes.extend(group_sorted)
+
+    if len(sorted_notes) != len(svg_centers):
         print(f"WARNING: Note count mismatch!")
-        print(f"  noteOn events: {len(note_on_events)}")
+        print(f"  noteOn events: {len(sorted_notes)}")
         print(f"  SVG note heads: {len(svg_centers)}")
         print("  Will match as many as possible...")
 
     # Match events to SVG centers 1-to-1
     matched = 0
-    for i, event in enumerate(note_on_events):
+    for i, event in enumerate(sorted_notes):
         if i < len(svg_centers):
             svg_x, svg_y = svg_centers[i]
             event['svgX'] = svg_x

@@ -62,11 +62,15 @@ def load_json_data(filepath):
 def collect_note_on_events(data):
     """
     Collect all noteOn events from the JSON data.
-    Returns a list of dicts with note info, sorted by (time, -note).
-    
-    The sorting matches SVG path sorting by (X, Y):
-    - time corresponds to X position (left to right)
-    - higher note (pitch) corresponds to lower Y (top of staff)
+    Returns a list of dicts with note info, sorted to match SVG path order.
+
+    Sorting strategy:
+    - Group notes by timestamp to identify chords
+    - Sort groups by time (left to right)
+    - Within each chord, sort by DESCENDING note (higher pitch first)
+
+    This matches SVG paths sorted by (X-group, ascending Y within group),
+    since higher pitch = lower Y on the staff.
     """
     note_on_events = []
 
@@ -81,18 +85,69 @@ def collect_note_on_events(data):
                     'time': event.get('time', 0),
                 })
 
-    # Sort by time, then by DESCENDING note (higher pitch first)
-    # This matches SVG sorting by (X, Y) where lower Y = higher pitch
-    note_on_events.sort(key=lambda e: (e['time'], -e['note']))
+    # Group notes by timestamp to identify chords
+    from collections import defaultdict
+    time_groups = defaultdict(list)
+    for note in note_on_events:
+        time_groups[note['time']].append(note)
 
-    return note_on_events
+    # Build final sorted list:
+    # - Groups sorted by time (chronological)
+    # - Within each group, sorted by DESCENDING note (higher pitch first)
+    #   This matches SVG Y order where lower Y = higher pitch
+    sorted_notes = []
+    for time in sorted(time_groups.keys()):
+        group = time_groups[time]
+        group_sorted = sorted(group, key=lambda n: -n['note'])  # Descending pitch
+        sorted_notes.extend(group_sorted)
+
+    return sorted_notes
+
+
+def group_by_x_tolerance(items, get_x, tolerance=15.0):
+    """
+    Group items by X position with tolerance.
+    Items within 'tolerance' X units of each other are considered the same chord.
+
+    Returns a list of groups, where each group is sorted by the average X of the group.
+    Within each group, items retain their original order.
+    """
+    if not items:
+        return []
+
+    # Sort by X first
+    sorted_items = sorted(items, key=get_x)
+
+    groups = []
+    current_group = [sorted_items[0]]
+    current_group_start_x = get_x(sorted_items[0])
+
+    for item in sorted_items[1:]:
+        item_x = get_x(item)
+        # Check if this item is within tolerance of the group's starting X
+        if item_x - current_group_start_x <= tolerance:
+            current_group.append(item)
+        else:
+            groups.append(current_group)
+            current_group = [item]
+            current_group_start_x = item_x
+
+    groups.append(current_group)
+    return groups
 
 
 def extract_svg_path_centers(svg_file):
     """
     Extract path elements from SVG file with their center coordinates.
-    Returns a list of (element, center_x, center_y) tuples sorted by (X, Y),
+    Returns a list of (element, center_x, center_y) tuples sorted for chord matching,
     and the ElementTree for later modification.
+
+    Sorting strategy:
+    - Group paths by X position (within tolerance) to identify chords
+    - Sort groups by their minimum X (left to right)
+    - Within each chord group, sort by Y (top to bottom = ascending Y)
+
+    This matches notes sorted by (time, ascending Y within chord).
     """
     try:
         # Register the SVG namespace to preserve it during output
@@ -129,11 +184,20 @@ def extract_svg_path_centers(svg_file):
 
             paths.append((elem, center_x, center_y))
 
-    # Sort by X position, then by Y position
-    # For chords (same X), lower Y = higher pitch, matching notes sorted by -note
-    paths.sort(key=lambda p: (p[1], p[2]))
+    # Group paths by X position (within tolerance) to identify chords
+    # Tolerance of 15 units handles bass/treble alignment differences
+    chord_groups = group_by_x_tolerance(paths, lambda p: p[1], tolerance=15.0)
 
-    return paths, tree
+    # Build final sorted list:
+    # - Groups sorted by minimum X (left to right)
+    # - Within each group, sorted by Y (ascending = top to bottom on page)
+    sorted_paths = []
+    for group in chord_groups:
+        # Sort within chord by Y (ascending Y = top to bottom = high pitch to low pitch)
+        group_sorted = sorted(group, key=lambda p: p[2])
+        sorted_paths.extend(group_sorted)
+
+    return sorted_paths, tree
 
 
 def sanitize_note_name(name):
@@ -194,7 +258,7 @@ def main():
 
     # Step 4: Match paths to notes by sorted index
     print("\nMatching paths to notes by sorted index...")
-    
+
     if len(paths_data) != len(note_events):
         diff = len(paths_data) - len(note_events)
         print(f"  Note: {abs(diff)} {'extra SVG paths' if diff > 0 else 'missing SVG paths'}")
@@ -208,11 +272,11 @@ def main():
 
     # Step 5: Rename all paths
     print("\nRenaming paths...")
-    
+
     renamed_count = 0
     matched_count = 0
     extra_count = 0
-    
+
     for i, (elem, center_x, center_y) in enumerate(paths_data):
         old_id = elem.get('id', 'no-id')
 
