@@ -51,7 +51,11 @@ def load_json_data(filepath):
 def collect_note_on_events(data):
     """
     Collect all noteOn events from the JSON data.
-    Returns a list of dicts with note info, sorted by time then note.
+    Returns a list of dicts with note info, sorted by svgX then svgY.
+
+    We sort by svgX (position) then svgY to match the SVG path sorting order.
+    This ensures that when multiple notes occur at the same X position (a chord),
+    they are matched correctly to the SVG paths by their Y position.
     """
     note_on_events = []
 
@@ -68,8 +72,8 @@ def collect_note_on_events(data):
                     'svgY': event.get('svgY', 0)
                 })
 
-    # Sort by time, then by note (for events at the same time)
-    note_on_events.sort(key=lambda e: (e['time'], e['note']))
+    # Sort by svgX, then by svgY (to match SVG path ordering)
+    note_on_events.sort(key=lambda e: (e['svgX'], e['svgY']))
 
     return note_on_events
 
@@ -114,8 +118,9 @@ def extract_svg_path_centers(svg_file):
 
             paths.append((elem, center_x, center_y))
 
-    # Sort by X position (left to right, which corresponds to time order)
-    paths.sort(key=lambda p: p[1])
+    # Sort by X position, then by Y position (to match note event ordering)
+    # This ensures chords (multiple notes at same X) are matched correctly
+    paths.sort(key=lambda p: (p[1], p[2]))
 
     return paths, tree
 
