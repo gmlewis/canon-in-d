@@ -337,41 +337,54 @@ def generate_bezier_points(curves, z_offset):
         }
         bezier_points.append(fly_in_peak)
 
+        # Track the last landing we actually added (for peak calculations)
+        last_added_landing = None
+
         for i, point in enumerate(landing_points):
+            current_x = point['svgX'] * X_SCALE
+            current_y = point['svgY'] * Y_SCALE
+
+            # Skip this landing if it's at the exact same position as the last added landing
+            # (avoids duplicate consecutive points at same x,y,z)
+            if last_added_landing is not None:
+                same_as_prev = (abs(last_added_landing['svgX'] - point['svgX']) < 0.01 and
+                                abs(last_added_landing['svgY'] - point['svgY']) < 0.01)
+                if same_as_prev:
+                    continue
+
+            # Add peak point between last added landing and this one (if positions differ)
+            if last_added_landing is not None:
+                mid_svg_x = (last_added_landing['svgX'] + point['svgX']) / 2.0
+                mid_svg_y = (last_added_landing['svgY'] + point['svgY']) / 2.0
+                peak = {
+                    'x': mid_svg_x * X_SCALE,
+                    'y': mid_svg_y * Y_SCALE,
+                    'z': z_offset,
+                    'type': 'peak',
+                    'noteName': f"{last_added_landing['noteName']} -> {point['noteName']}",
+                    'note': None,
+                    'timestamp': (last_added_landing['timestamp'] + point['timestamp']) / 2.0,
+                    'pointType': 'arc_peak',
+                    'svgX': mid_svg_x,
+                    'svgY': mid_svg_y
+                }
+                bezier_points.append(peak)
+
             # Landing point (on the note, Z=0)
-            # Apply scale factors to convert SVG coordinates to Blender units
             landing = {
-                'x': point['svgX'] * X_SCALE,
-                'y': point['svgY'] * Y_SCALE,
+                'x': current_x,
+                'y': current_y,
                 'z': 0.0,
                 'type': 'landing',
                 'noteName': point['noteName'],
                 'note': point['note'],
                 'timestamp': point['timestamp'],
                 'pointType': point['pointType'],
-                'svgX': point['svgX'],  # Keep original SVG coords for debugging
+                'svgX': point['svgX'],
                 'svgY': point['svgY']
             }
             bezier_points.append(landing)
-
-            # Add peak point between this landing and the next (if not last)
-            if i < len(landing_points) - 1:
-                next_point = landing_points[i + 1]
-                mid_svg_x = (point['svgX'] + next_point['svgX']) / 2.0
-                mid_svg_y = (point['svgY'] + next_point['svgY']) / 2.0
-                peak = {
-                    'x': mid_svg_x * X_SCALE,
-                    'y': mid_svg_y * Y_SCALE,
-                    'z': z_offset,
-                    'type': 'peak',
-                    'noteName': f"{point['noteName']} -> {next_point['noteName']}",
-                    'note': None,
-                    'timestamp': (point['timestamp'] + next_point['timestamp']) / 2.0,
-                    'pointType': 'arc_peak',
-                    'svgX': mid_svg_x,  # Keep original SVG coords for debugging
-                    'svgY': mid_svg_y
-                }
-                bezier_points.append(peak)
+            last_added_landing = point  # Track for next iteration
 
         # Get the last landing point info for the fly-off
         last_landing = landing_points[-1]
