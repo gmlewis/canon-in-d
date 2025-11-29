@@ -19,7 +19,7 @@ OUTPUT_JSON_FILE = "note-jumping-curves.json"
 # Blender scene configuration
 COLLECTION_NAME = "Note Jumping Curves"
 PARENT_NAME = "Note Jumping Curves Parent"
-MAX_JUMPING_CURVE_Z_OFFSET = 1.0  # Height of the arc peak between notes
+MAX_JUMPING_CURVE_Z_OFFSET = 0.5  # Height of the arc peak between notes
 
 # Scale factors to convert SVG coordinates to Blender units (meters)
 # SVG coordinates are in pixels, Blender uses meters by default
@@ -163,6 +163,10 @@ def build_curve_data(data, max_curves):
     for curve_name in curves:
         curves[curve_name].append(start_point.copy())
 
+    # Find the time of the last noteOn event
+    # After this time, we should NOT reassign curves - just let them stay put
+    last_note_on_time = max(t for t, et, e in events if et == 'noteOn')
+
     # Process events in time order
     i = 0
     while i < len(events):
@@ -177,6 +181,11 @@ def build_curve_data(data, max_curves):
         # Separate noteOff and noteOn events
         note_offs = [(t, et, e) for t, et, e in events_at_time if et == 'noteOff']
         note_ons = [(t, et, e) for t, et, e in events_at_time if et == 'noteOn']
+
+        # If we're past the last noteOn, skip processing noteOffs
+        # (curves should stay at their final positions)
+        if current_time > last_note_on_time:
+            continue
 
         # Process noteOff events first - free up curves
         for time, event_type, event in note_offs:
@@ -243,14 +252,25 @@ def build_curve_data(data, max_curves):
         curve_assignments = new_assignments
 
     # All curves end at end_time, jumping off to the right
+    # Use each curve's LAST LANDING (not merged) position for the end point
     for curve_name in curves:
         if curves[curve_name]:
-            last_point = curves[curve_name][-1]
+            # Find the last point that was a real "landing" (not merged)
+            last_landing = None
+            for point in reversed(curves[curve_name]):
+                if point['pointType'] in ('landing', 'start'):
+                    last_landing = point
+                    break
+
+            # If no landing found, fall back to last point
+            if last_landing is None:
+                last_landing = curves[curve_name][-1]
+
             end_point = {
-                'noteName': last_point['noteName'],
-                'note': last_point['note'],
-                'svgX': last_point['svgX'] + END_X_OFFSET,
-                'svgY': last_point['svgY'],
+                'noteName': last_landing['noteName'],
+                'note': last_landing['note'],
+                'svgX': last_landing['svgX'] + END_X_OFFSET,
+                'svgY': last_landing['svgY'],  # Use last LANDING's Y, not merged Y
                 'timestamp': end_time,
                 'pointType': 'end'
             }
@@ -264,18 +284,58 @@ def generate_bezier_points(curves, z_offset):
     Generate the actual bezier control points for each curve.
 
     For each curve, creates:
-    - Landing points (Z=0) at each note position
+    - A "fly-in" start point hovering at Z=z_offset, off-screen to the left
     - Peak points (Z=z_offset) at midpoints between landings
+    - Landing points (Z=0) at each note position
+    - A "fly-off" end point hovering at Z=z_offset, off-screen to the right
 
     Returns a dict with bezier point data ready for Blender.
     """
     bezier_curves = {}
+
+    # Offset for fly-in/fly-off points (in Blender units, already scaled)
+    FLY_OFFSET = 1.0  # 1 meter off-screen
 
     for curve_name, landing_points in curves.items():
         if len(landing_points) < 2:
             continue
 
         bezier_points = []
+
+        # Get the first landing point info for the fly-in
+        first_landing = landing_points[0]
+        first_x = first_landing['svgX'] * X_SCALE
+        first_y = first_landing['svgY'] * Y_SCALE
+
+        # Add fly-in start point (hovering at z_offset, WAY off to the left at x=-1)
+        fly_in_start = {
+            'x': -1.0,  # Absolute position: way off-screen left
+            'y': first_y,
+            'z': z_offset,  # Hovering, not on the ground
+            'type': 'fly_in',
+            'noteName': f"fly-in -> {first_landing['noteName']}",
+            'note': None,
+            'timestamp': first_landing['timestamp'] - 1.0,
+            'pointType': 'fly_in_start',
+            'svgX': -100,  # Off-screen in SVG coords too
+            'svgY': first_landing['svgY']
+        }
+        bezier_points.append(fly_in_start)
+
+        # Add arc peak between fly-in and first landing
+        fly_in_peak = {
+            'x': first_x - (FLY_OFFSET / 2.0),
+            'y': first_y,
+            'z': z_offset,  # Peak at same height as fly-in
+            'type': 'peak',
+            'noteName': f"fly-in peak -> {first_landing['noteName']}",
+            'note': None,
+            'timestamp': first_landing['timestamp'] - 0.5,
+            'pointType': 'fly_in_peak',
+            'svgX': first_landing['svgX'] - (FLY_OFFSET / 2.0 / X_SCALE),
+            'svgY': first_landing['svgY']
+        }
+        bezier_points.append(fly_in_peak)
 
         for i, point in enumerate(landing_points):
             # Landing point (on the note, Z=0)
@@ -312,6 +372,41 @@ def generate_bezier_points(curves, z_offset):
                     'svgY': mid_svg_y
                 }
                 bezier_points.append(peak)
+
+        # Get the last landing point info for the fly-off
+        last_landing = landing_points[-1]
+        last_x = last_landing['svgX'] * X_SCALE
+        last_y = last_landing['svgY'] * Y_SCALE
+
+        # Add arc peak between last landing and fly-off
+        fly_off_peak = {
+            'x': last_x + (FLY_OFFSET / 2.0),
+            'y': last_y,
+            'z': z_offset,
+            'type': 'peak',
+            'noteName': f"{last_landing['noteName']} -> fly-off peak",
+            'note': None,
+            'timestamp': last_landing['timestamp'] + 0.5,
+            'pointType': 'fly_off_peak',
+            'svgX': last_landing['svgX'] + (FLY_OFFSET / 2.0 / X_SCALE),
+            'svgY': last_landing['svgY']
+        }
+        bezier_points.append(fly_off_peak)
+
+        # Add fly-off end point (hovering at z_offset, WAY off to the right)
+        fly_off_end = {
+            'x': last_x + 5.0,  # 5 meters past last landing - way off-screen
+            'y': last_y,
+            'z': z_offset,  # Hovering, not on the ground
+            'type': 'fly_off',
+            'noteName': f"{last_landing['noteName']} -> fly-off",
+            'note': None,
+            'timestamp': last_landing['timestamp'] + 1.0,
+            'pointType': 'fly_off_end',
+            'svgX': last_landing['svgX'] + 500,  # Way off-screen in SVG coords
+            'svgY': last_landing['svgY']
+        }
+        bezier_points.append(fly_off_end)
 
         bezier_curves[curve_name] = {
             'landingCount': len(landing_points),

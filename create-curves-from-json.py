@@ -195,6 +195,10 @@ def create_bezier_curve(curve_name, curve_data, config, collection, parent_empty
             # Peak points use AUTO handles for smooth arcs
             bp.handle_left_type = 'AUTO'
             bp.handle_right_type = 'AUTO'
+        elif point_type in ('fly_in', 'fly_off'):
+            # Fly-in and fly-off points are hovering, use AUTO for smooth flight
+            bp.handle_left_type = 'AUTO'
+            bp.handle_right_type = 'AUTO'
         else:
             # Default to AUTO for unknown types
             bp.handle_left_type = 'AUTO'
