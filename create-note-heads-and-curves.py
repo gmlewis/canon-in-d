@@ -138,102 +138,54 @@ def prevent_curve_crossings(curves_data):
                 curves_data[curve_info['curve_name']]['points'][point_idx]['y'] = current_y_values[i]
             swap_count += 1
 
-    # Now swap Y values for peak points between the same curves
-    # Peaks inherit swaps from their adjacent landings
-    swap_peak_y_values(curves_data, curve_landing_indices, curve_names)
+    # Recalculate Y values for all peak points based on their adjacent landings
+    # This ensures peaks remain at the exact midpoint after landing Y swaps
+    recalculate_peak_y_values(curves_data, curve_names)
 
     return swap_count
 
 
-def swap_peak_y_values(curves_data, curve_landing_indices, curve_names):
+def recalculate_peak_y_values(curves_data, curve_names):
     """
-    Swap Y values for peak points to match the swaps made at landing points.
+    Recalculate Y values for all arc_peak points based on their adjacent landings.
 
-    For each peak, we look at the previous and next landing points and determine
-    what Y swaps occurred there, then apply consistent swaps to the peak.
+    After landing Y values have been swapped to prevent crossings, the peak Y values
+    must be recalculated as the exact midpoint of the previous and next landing Y values.
+    This ensures peaks remain at the geometric midpoint for orthographic top-view alignment.
 
     Args:
         curves_data: Dict of curve data (modified in place)
-        curve_landing_indices: Dict mapping curve names to {x_pos: point_idx}
         curve_names: Sorted list of curve names
     """
-    # Build a mapping of X position -> {curve_name: y_value} for all landings
-    # This represents the FINAL (post-swap) Y values at each X position
-    landing_y_by_x = {}
-    for curve_name in curve_names:
-        for x_pos, point_idx in curve_landing_indices[curve_name].items():
-            if x_pos not in landing_y_by_x:
-                landing_y_by_x[x_pos] = {}
-            landing_y_by_x[x_pos][curve_name] = curves_data[curve_name]['points'][point_idx]['y']
-
-    sorted_x_positions = sorted(landing_y_by_x.keys())
-
-    # For each curve, process its peak points
     for curve_name in curve_names:
         points = curves_data[curve_name]['points']
         num_points = len(points)
 
         for i, point in enumerate(points):
-            if point.get('type') != 'peak':
+            # Only process arc_peak points (not fly_in_peak or fly_off_peak)
+            if point.get('pointType') != 'arc_peak':
                 continue
 
-            peak_x = point['x']
+            # Find the previous landing point
+            prev_landing = None
+            for j in range(i - 1, -1, -1):
+                if points[j].get('type') == 'landing':
+                    prev_landing = points[j]
+                    break
 
-            # Find the previous and next landing X positions for this curve
-            prev_landing_x = None
-            next_landing_x = None
+            # Find the next landing point
+            next_landing = None
+            for j in range(i + 1, num_points):
+                if points[j].get('type') == 'landing':
+                    next_landing = points[j]
+                    break
 
-            for x_pos in sorted_x_positions:
-                if x_pos < peak_x:
-                    if curve_name in landing_y_by_x.get(x_pos, {}):
-                        prev_landing_x = x_pos
-                elif x_pos > peak_x:
-                    if curve_name in landing_y_by_x.get(x_pos, {}):
-                        next_landing_x = x_pos
-                        break
-
-            if prev_landing_x is None or next_landing_x is None:
+            if prev_landing is None or next_landing is None:
                 continue
 
-            # Get all curves that have landings at both prev and next X positions
-            curves_at_prev = set(landing_y_by_x.get(prev_landing_x, {}).keys())
-            curves_at_next = set(landing_y_by_x.get(next_landing_x, {}).keys())
-            common_curves = curves_at_prev & curves_at_next
-
-            if len(common_curves) < 2:
-                continue
-
-            # For each curve in common_curves, find their peak between prev and next
-            # and swap Y values to maintain the same relative ordering
-            peaks_to_swap = []
-            for cn in common_curves:
-                cn_points = curves_data[cn]['points']
-                for j, p in enumerate(cn_points):
-                    if p.get('type') == 'peak':
-                        p_x = p['x']
-                        # Check if this peak is between prev_landing_x and next_landing_x
-                        if prev_landing_x < p_x < next_landing_x:
-                            # Verify it's the peak between those specific landings
-                            peaks_to_swap.append({
-                                'curve_name': cn,
-                                'point_idx': j,
-                                'y': p['y']
-                            })
-                            break
-
-            if len(peaks_to_swap) < 2:
-                continue
-
-            # Sort peaks by their current Y values
-            current_peak_y_values = sorted([p['y'] for p in peaks_to_swap])
-
-            # Sort curves by curve number
-            peaks_to_swap_sorted = sorted(peaks_to_swap, key=lambda p: int(p['curve_name'].replace('curve', '')))
-
-            # Assign Y values: smallest curve number gets smallest Y
-            for idx, peak_info in enumerate(peaks_to_swap_sorted):
-                point_idx = peak_info['point_idx']
-                curves_data[peak_info['curve_name']]['points'][point_idx]['y'] = current_peak_y_values[idx]
+            # Recalculate Y as the exact midpoint of the two landings
+            new_y = (prev_landing['y'] + next_landing['y']) / 2.0
+            point['y'] = new_y
 
 
 def set_up_collection(collection_name):
