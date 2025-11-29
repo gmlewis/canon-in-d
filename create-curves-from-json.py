@@ -120,15 +120,85 @@ def create_bezier_curve(curve_name, curve_data, config, collection, parent_empty
     num_points = len(points)
     spline.bezier_points.add(num_points - 1)
 
-    # Get handle type from config
-    handle_type = config.get('handleType', 'AUTO')
+    # Get Z offset for calculating handle lengths
+    z_offset = config.get('maxJumpingCurveZOffset', 1.0)
 
-    # Set all bezier points
+    # Handle length factor - controls how "sharp" the bounce is
+    # At 45 degrees, the handle length in X/Y should equal the handle length in Z
+    handle_length = z_offset * 0.5  # Adjust this to control sharpness
+
+    # Set all bezier points with custom handles for landing points
     for i, point in enumerate(points):
         bp = spline.bezier_points[i]
-        bp.co = (point['x'], point['y'], point['z'])
-        bp.handle_left_type = handle_type
-        bp.handle_right_type = handle_type
+        x, y, z = point['x'], point['y'], point['z']
+        bp.co = (x, y, z)
+
+        point_type = point.get('type', 'unknown')
+
+        if point_type == 'landing':
+            # Landing points need sharp 45-degree angle handles
+            # Use FREE handles so we can position them manually
+            bp.handle_left_type = 'FREE'
+            bp.handle_right_type = 'FREE'
+
+            # Calculate handle directions based on neighboring points
+            # Left handle points "up and back" (toward previous peak)
+            # Right handle points "up and forward" (toward next peak)
+
+            # Get previous and next points for direction calculation
+            prev_point = points[i - 1] if i > 0 else None
+            next_point = points[i + 1] if i < num_points - 1 else None
+
+            # Left handle (entry) - coming down from the previous peak
+            if prev_point:
+                # Direction from previous point to this point
+                dx = x - prev_point['x']
+                dy = y - prev_point['y']
+                # Normalize and scale
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist > 0:
+                    dx_norm = dx / dist
+                    dy_norm = dy / dist
+                else:
+                    dx_norm, dy_norm = -1, 0
+                # Left handle points backward and up at 45 degrees
+                bp.handle_left = (
+                    x - dx_norm * handle_length,
+                    y - dy_norm * handle_length,
+                    z + handle_length  # Up in Z
+                )
+            else:
+                bp.handle_left = (x - handle_length, y, z + handle_length)
+
+            # Right handle (exit) - going up to the next peak
+            if next_point:
+                # Direction from this point to next point
+                dx = next_point['x'] - x
+                dy = next_point['y'] - y
+                # Normalize and scale
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist > 0:
+                    dx_norm = dx / dist
+                    dy_norm = dy / dist
+                else:
+                    dx_norm, dy_norm = 1, 0
+                # Right handle points forward and up at 45 degrees
+                bp.handle_right = (
+                    x + dx_norm * handle_length,
+                    y + dy_norm * handle_length,
+                    z + handle_length  # Up in Z
+                )
+            else:
+                bp.handle_right = (x + handle_length, y, z + handle_length)
+
+        elif point_type == 'peak':
+            # Peak points use AUTO handles for smooth arcs
+            bp.handle_left_type = 'AUTO'
+            bp.handle_right_type = 'AUTO'
+        else:
+            # Default to AUTO for unknown types
+            bp.handle_left_type = 'AUTO'
+            bp.handle_right_type = 'AUTO'
 
     # Create the curve object
     curve_obj = bpy.data.objects.new(f"{curve_name}_curve", curve_data_blender)
