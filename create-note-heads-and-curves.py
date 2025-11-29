@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Blender 5.0 script to create bezier curves from pre-generated JSON data.
+Blender 5.0 script to create bezier curves and note heads from pre-generated data.
 Run this script from within Blender's scripting environment.
 
-This script reads the JSON output from gen-note-jumping-curves-to-json.py
-and creates all the bezier curves in Blender.
+This script:
+1. Reads the JSON output from gen-note-jumping-curves-to-json.py
+   and creates all the bezier curves in Blender.
+2. Imports note head SVG elements, scales them, and organizes them
+   in a dedicated collection.
 
 All configuration is read from the JSON file, so you can edit the JSON
 to customize the curves without modifying this script.
@@ -20,6 +23,12 @@ import os
 # ============================================================================
 # Path to the JSON file (relative to the .blend file or absolute)
 JSON_FILE = "note-jumping-curves.json"
+
+# Note Heads SVG file
+NOTE_HEADS_SVG_FILE = "Canon_in_D-single-svg_printing_NoteHeads_renamed.svg"
+NOTE_HEADS_COLLECTION_NAME = "Note Heads"
+NOTE_HEADS_PARENT_NAME = "Note Heads Parent"
+NOTE_HEADS_SCALE = 100.0
 
 
 def load_curve_data(filepath):
@@ -227,7 +236,7 @@ def swap_peak_y_values(curves_data, curve_landing_indices, curve_names):
                 curves_data[peak_info['curve_name']]['points'][point_idx]['y'] = current_peak_y_values[idx]
 
 
-def setup_collection(collection_name):
+def set_up_collection(collection_name):
     """
     Set up the collection for curves.
     - If it exists, delete all objects within it.
@@ -395,9 +404,194 @@ def create_bezier_curve(curve_name, curve_data, config, collection, parent_empty
     }
 
 
+# ============================================================================
+# Note Heads Functions
+# ============================================================================
+
+def set_up_note_heads_collection(collection_name):
+    """
+    Set up the collection for note heads.
+    - If it exists, delete ALL children within it (recursively).
+    - If it doesn't exist, create it.
+    """
+    scene = bpy.context.scene
+    collection = bpy.data.collections.get(collection_name)
+
+    if collection is not None:
+        print(f"Collection '{collection_name}' exists. Removing all children...")
+        # Delete all objects in the collection recursively
+        objects_to_delete = []
+
+        def collect_objects(coll):
+            for obj in coll.objects:
+                objects_to_delete.append(obj)
+            for child_coll in coll.children:
+                collect_objects(child_coll)
+
+        collect_objects(collection)
+
+        for obj in objects_to_delete:
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+        # Also remove any child collections
+        child_collections = list(collection.children)
+        for child_coll in child_collections:
+            bpy.data.collections.remove(child_coll)
+
+        print(f"  Removed {len(objects_to_delete)} objects.")
+    else:
+        print(f"Creating new collection '{collection_name}'...")
+        collection = bpy.data.collections.new(collection_name)
+        scene.collection.children.link(collection)
+
+    return collection
+
+
+def create_note_heads_parent(collection, parent_name):
+    """Create an empty axis object to serve as parent for all note heads."""
+    empty = bpy.data.objects.new(parent_name, None)
+    empty.empty_display_type = 'PLAIN_AXES'
+    empty.empty_display_size = 1.0
+    collection.objects.link(empty)
+    print(f"Created note heads parent empty '{parent_name}'")
+    return empty
+
+
+def find_svg_file(filename):
+    """Find the SVG file, trying multiple paths."""
+    paths_to_try = [filename]
+
+    blend_dir = bpy.path.abspath("//")
+    if blend_dir:
+        paths_to_try.insert(0, os.path.join(blend_dir, filename))
+
+    for path in paths_to_try:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+def import_and_setup_note_heads(collection, parent_empty, svg_filename, scale_factor):
+    """
+    Import SVG note heads, scale them, apply scale, and parent to the empty.
+
+    Args:
+        collection: Blender collection to add objects to
+        parent_empty: Parent empty object for note heads
+        svg_filename: Name of the SVG file to import
+        scale_factor: Scale factor to apply (e.g., 100.0)
+
+    Returns:
+        List of imported objects
+    """
+    # Find the SVG file
+    svg_path = find_svg_file(svg_filename)
+    if svg_path is None:
+        print(f"ERROR: Could not find SVG file '{svg_filename}'", file=sys.stderr)
+        return []
+
+    print(f"Importing SVG from: {svg_path}")
+
+    # Store existing objects to identify newly imported ones
+    existing_objects = set(bpy.data.objects[:])
+
+    # Import the SVG
+    bpy.ops.import_curve.svg(filepath=svg_path)
+
+    # Find newly imported objects
+    new_objects = [obj for obj in bpy.data.objects if obj not in existing_objects]
+    print(f"  Imported {len(new_objects)} objects from SVG")
+
+    if not new_objects:
+        print("  WARNING: No objects were imported from the SVG")
+        return []
+
+    # Deselect all, then select only the new objects
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in new_objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = new_objects[0]
+
+    # Scale all imported objects
+    print(f"  Scaling all imported objects by {scale_factor}...")
+    for obj in new_objects:
+        obj.scale = (scale_factor, scale_factor, scale_factor)
+
+    # Apply scale to all imported objects
+    print(f"  Applying scale to all imported objects...")
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+    # Move objects to the Note Heads collection and parent them
+    print(f"  Parenting objects to '{parent_empty.name}'...")
+    for obj in new_objects:
+        # Remove from any existing collections
+        for coll in obj.users_collection:
+            coll.objects.unlink(obj)
+        # Add to our collection
+        collection.objects.link(obj)
+        # Parent to the empty
+        obj.parent = parent_empty
+
+    print(f"  Successfully set up {len(new_objects)} note head objects")
+    return new_objects
+
+
+def set_up_note_heads():
+    """
+    Main function to set up note heads:
+    1. Set up the Note Heads collection (delete existing children or create new)
+    2. Create a Note Heads Parent empty
+    3. Import SVG, scale, apply scale, and parent all elements
+    """
+    print("\n" + "=" * 70)
+    print("Setting up Note Heads")
+    print("=" * 70)
+
+    # Step 1: Set up the collection
+    print(f"\nSetting up collection '{NOTE_HEADS_COLLECTION_NAME}'...")
+    collection = set_up_note_heads_collection(NOTE_HEADS_COLLECTION_NAME)
+
+    # Step 2: Create parent empty
+    print(f"\nCreating parent empty...")
+    parent_empty = create_note_heads_parent(collection, NOTE_HEADS_PARENT_NAME)
+
+    # Step 3: Import and set up note heads
+    print(f"\nImporting note heads from '{NOTE_HEADS_SVG_FILE}'...")
+    note_head_objects = import_and_setup_note_heads(
+        collection, parent_empty, NOTE_HEADS_SVG_FILE, NOTE_HEADS_SCALE
+    )
+
+    # Summary
+    print("\n" + "-" * 70)
+    print("Note Heads setup complete!")
+    print(f"  Collection: '{NOTE_HEADS_COLLECTION_NAME}'")
+    print(f"  Parent: '{NOTE_HEADS_PARENT_NAME}'")
+    print(f"  Note head objects: {len(note_head_objects)}")
+    print("-" * 70)
+
+    return {
+        'collection': collection,
+        'parent': parent_empty,
+        'objects': note_head_objects
+    }
+
+
 def main():
     print("=" * 70)
-    print("Create Curves from JSON (Blender Script)")
+    print("Create Note Heads and Curves (Blender Script)")
+    print("=" * 70)
+
+    # ========================================================================
+    # Part 1: Set up Note Heads
+    # ========================================================================
+    note_heads_result = set_up_note_heads()
+
+    # ========================================================================
+    # Part 2: Create Bezier Curves from JSON
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("Creating Bezier Curves from JSON")
     print("=" * 70)
 
     # Step 1: Load JSON data
@@ -435,7 +629,7 @@ def main():
     # Step 3: Set up collection
     collection_name = config.get('collectionName', 'Note Jumping Curves')
     print(f"\nSetting up collection '{collection_name}'...")
-    collection = setup_collection(collection_name)
+    collection = set_up_collection(collection_name)
 
     # Step 4: Create parent empty
     parent_name = config.get('parentName', 'Note Jumping Curves Parent')
@@ -457,11 +651,19 @@ def main():
 
     # Step 6: Summary
     print("\n" + "=" * 70)
-    print("Curve creation complete!")
+    print("Script execution complete!")
+    print("=" * 70)
+
+    print("\nNote Heads:")
+    print(f"  Collection: '{NOTE_HEADS_COLLECTION_NAME}'")
+    print(f"  Parent: '{NOTE_HEADS_PARENT_NAME}'")
+    print(f"  Objects: {len(note_heads_result.get('objects', []))}")
+
+    print(f"\nBezier Curves:")
     print(f"  Collection: '{collection_name}'")
     print(f"  Parent: '{parent_name}'")
     print(f"  Curves created: {len(curve_objects)}")
-    print("\nHierarchy:")
+    print("\nCurve Hierarchy:")
     print(f"  {collection_name} (Collection)")
     print(f"  └── {parent_name} (Empty)")
     for curve_name in sorted(curve_objects.keys(), key=lambda x: int(x.replace('curve', ''))):
