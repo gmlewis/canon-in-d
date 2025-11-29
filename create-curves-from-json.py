@@ -48,6 +48,152 @@ def load_curve_data(filepath):
     return None
 
 
+def prevent_curve_crossings(curves_data):
+    """
+    Ensure curves never cross in the X-Y plane by swapping Y values at noteOn events.
+    
+    At every 'landing' (noteOn) event, all curves are sorted such that their Y values
+    satisfy the invariant: curve1.Y <= curve2.Y <= ... <= curveN.Y
+    
+    This function modifies the curves_data in place, preserving the current curve
+    assignments (which curve a ball is on) while swapping Y positions between curves
+    to prevent crossings.
+    
+    Args:
+        curves_data: Dict of curve data from JSON (will be modified in place)
+    
+    Returns:
+        Number of swaps performed
+    """
+    curve_names = sorted(curves_data.keys(), key=lambda x: int(x.replace('curve', '')))
+    num_curves = len(curve_names)
+    
+    if num_curves < 2:
+        return 0
+    
+    # Build an index of landing points for each curve, keyed by X position
+    # For each curve, create a dict: x_position -> point_index
+    curve_landing_indices = {}
+    for curve_name in curve_names:
+        points = curves_data[curve_name]['points']
+        landing_indices = {}
+        for i, point in enumerate(points):
+            if point.get('type') == 'landing':
+                # Use rounded X to handle floating point comparison
+                x_key = round(point['x'], 6)
+                landing_indices[x_key] = i
+        curve_landing_indices[curve_name] = landing_indices
+    
+    # Collect all unique X positions where landing events occur (across all curves)
+    all_x_positions = set()
+    for curve_name in curve_names:
+        all_x_positions.update(curve_landing_indices[curve_name].keys())
+    
+    # Sort X positions from lowest to highest
+    sorted_x_positions = sorted(all_x_positions)
+    
+    # Track the current Y assignment for each curve
+    # Initially, each curve maintains its own Y values
+    # We'll track which "logical Y slot" each curve occupies
+    
+    # For each X position, we need to determine the proper Y ordering
+    swap_count = 0
+    
+    for x_pos in sorted_x_positions:
+        # Collect all curves that have a landing at this X position
+        curves_at_x = []
+        for curve_name in curve_names:
+            if x_pos in curve_landing_indices[curve_name]:
+                point_idx = curve_landing_indices[curve_name][x_pos]
+                point = curves_data[curve_name]['points'][point_idx]
+                curves_at_x.append({
+                    'curve_name': curve_name,
+                    'point_idx': point_idx,
+                    'y': point['y']
+                })
+        
+        if len(curves_at_x) < 2:
+            continue
+        
+        # Sort curves by their current Y values (ascending)
+        curves_at_x.sort(key=lambda c: c['y'])
+        
+        # Check if the curves are already in the correct order (by curve index)
+        # The invariant is: curve1.Y <= curve2.Y <= ... <= curveN.Y
+        # So curve1 should have the smallest Y, curve2 next smallest, etc.
+        
+        # Get the current Y values
+        current_y_values = [c['y'] for c in curves_at_x]
+        
+        # Get the curve indices and sort them to get expected order
+        curve_indices = [(int(c['curve_name'].replace('curve', '')), c) for c in curves_at_x]
+        curve_indices.sort(key=lambda x: x[0])  # Sort by curve number
+        
+        # Now assign Y values: smallest curve number gets smallest Y
+        # This ensures curves never cross
+        needs_swap = False
+        for i, (curve_idx, curve_info) in enumerate(curve_indices):
+            target_y = current_y_values[i]  # i-th smallest Y value
+            if abs(curve_info['y'] - target_y) > 1e-9:
+                needs_swap = True
+                break
+        
+        if needs_swap:
+            # Perform the Y swaps
+            # Assign Y values so that lower curve numbers get lower Y values
+            for i, (curve_idx, curve_info) in enumerate(curve_indices):
+                target_y = current_y_values[i]
+                point_idx = curve_info['point_idx']
+                curves_data[curve_info['curve_name']]['points'][point_idx]['y'] = target_y
+            swap_count += 1
+    
+    # Now we need to update the peak points as well
+    # Peaks are between landings, so we need to recalculate their Y positions
+    # to ensure smooth transitions without crossings
+    update_peak_positions(curves_data)
+    
+    return swap_count
+
+
+def update_peak_positions(curves_data):
+    """
+    Update peak point Y positions to be the average of adjacent landing points.
+    This ensures smooth curves after Y value swaps.
+    
+    Args:
+        curves_data: Dict of curve data (modified in place)
+    """
+    for curve_name, curve_info in curves_data.items():
+        points = curve_info['points']
+        num_points = len(points)
+        
+        for i, point in enumerate(points):
+            if point.get('type') == 'peak':
+                # Find the adjacent landing points
+                prev_landing = None
+                next_landing = None
+                
+                # Look backwards for previous landing
+                for j in range(i - 1, -1, -1):
+                    if points[j].get('type') == 'landing':
+                        prev_landing = points[j]
+                        break
+                
+                # Look forwards for next landing
+                for j in range(i + 1, num_points):
+                    if points[j].get('type') == 'landing':
+                        next_landing = points[j]
+                        break
+                
+                # Update Y to be the average of adjacent landings
+                if prev_landing and next_landing:
+                    point['y'] = (prev_landing['y'] + next_landing['y']) / 2
+                elif prev_landing:
+                    point['y'] = prev_landing['y']
+                elif next_landing:
+                    point['y'] = next_landing['y']
+
+
 def setup_collection(collection_name):
     """
     Set up the collection for curves.
@@ -248,17 +394,22 @@ def main():
     print(f"  Curve resolution: {config.get('curveResolution', 'unknown')}")
     print(f"  Handle type: {config.get('handleType', 'unknown')}")
 
-    # Step 2: Set up collection
+    # Step 2: Prevent curve crossings in X-Y plane
+    print(f"\nPreventing curve crossings in X-Y plane...")
+    swap_count = prevent_curve_crossings(curves_data)
+    print(f"  Performed Y-value adjustments at {swap_count} X positions")
+
+    # Step 3: Set up collection
     collection_name = config.get('collectionName', 'Note Jumping Curves')
     print(f"\nSetting up collection '{collection_name}'...")
     collection = setup_collection(collection_name)
 
-    # Step 3: Create parent empty
+    # Step 4: Create parent empty
     parent_name = config.get('parentName', 'Note Jumping Curves Parent')
     print(f"\nCreating parent empty...")
     parent_empty = create_parent_empty(collection, parent_name)
 
-    # Step 4: Create all bezier curves
+    # Step 5: Create all bezier curves
     print(f"\nCreating {len(curves_data)} bezier curves...")
     curve_objects = {}
 
@@ -271,7 +422,7 @@ def main():
             bezier_count = curve_info.get('bezierPointCount', 0)
             print(f"  Created {curve_name}: {landing_count} landings, {bezier_count} bezier points")
 
-    # Step 5: Summary
+    # Step 6: Summary
     print("\n" + "=" * 70)
     print("Curve creation complete!")
     print(f"  Collection: '{collection_name}'")
