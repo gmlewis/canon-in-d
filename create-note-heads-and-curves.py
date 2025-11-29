@@ -188,6 +188,268 @@ def recalculate_peak_y_values(curves_data, curve_names):
             point['y'] = new_y
 
 
+def optimize_path_grouping(curves_data):
+    """
+    Optimize curve path assignments to prevent X-Y plane crossovers.
+
+    PROBLEM:
+    Curves are initially assigned by pitch order at each timestamp. This can cause
+    visual crossings when a curve that was in the bass clef suddenly jumps to a
+    high treble note, crossing over curves that are in between.
+
+    EXAMPLE (from the user's description):
+    - note C#4 at t=18.9s has 3 curves bouncing from it
+    - One curve correctly goes to D3 (bass clef) - this is fine
+    - Two curves incorrectly go to D5 and F#5 (treble clef), but they CROSS over
+      other curves to get there. They should have come from C#5 instead.
+
+    SOLUTION:
+    Work backwards from detected crossings to find where curves should have diverged
+    earlier to maintain non-crossing paths. When a crossing is detected, trace back
+    to find a point where the curves could have been swapped to avoid the crossing.
+
+    ALGORITHM:
+    1. Build a timeline of all landing events across all curves
+    2. At each pair of consecutive timestamps, check if any curves cross
+       (their Y order swaps between the two timestamps)
+    3. When a crossing is detected, work backwards to find a "divergence point" where
+       the crossing curves were at the same or similar Y position (on same note)
+    4. Swap the curve assignments from that divergence point forward to the crossing point
+
+    The key insight is: if curve A is lower than curve B at time T1, but higher at T2,
+    they must have crossed. We trace back to find when they were together and swap
+    their assignments from that point.
+
+    Args:
+        curves_data: Dict of curve data from JSON (will be modified in place)
+
+    Returns:
+        Number of path swaps performed
+    """
+    curve_names = sorted(curves_data.keys(), key=lambda x: int(x.replace('curve', '')))
+    num_curves = len(curve_names)
+
+    if num_curves < 2:
+        return 0
+
+    # Build index: for each curve, map x_position (rounded) -> point_index for landings
+    def build_landing_index(curves_data, curve_names):
+        curve_landing_indices = {}
+        for curve_name in curve_names:
+            points = curves_data[curve_name]['points']
+            landing_indices = {}
+            for i, point in enumerate(points):
+                if point.get('type') == 'landing':
+                    x_key = round(point['x'], 6)
+                    landing_indices[x_key] = i
+            curve_landing_indices[curve_name] = landing_indices
+        return curve_landing_indices
+
+    curve_landing_indices = build_landing_index(curves_data, curve_names)
+
+    # Get all unique X positions where landings occur, sorted chronologically
+    all_x_positions = set()
+    for curve_name in curve_names:
+        all_x_positions.update(curve_landing_indices[curve_name].keys())
+    sorted_x_positions = sorted(all_x_positions)
+
+    if len(sorted_x_positions) < 2:
+        return 0
+
+    swap_count = 0
+
+    # Do multiple passes since fixing one crossing might reveal or fix others
+    max_passes = 20
+    for pass_num in range(max_passes):
+        crossings_fixed_this_pass = 0
+
+        # Rebuild the landing index after any swaps from previous pass
+        curve_landing_indices = build_landing_index(curves_data, curve_names)
+
+        # Check each pair of consecutive X positions for crossings
+        for x_idx in range(len(sorted_x_positions) - 1):
+            x_current = sorted_x_positions[x_idx]
+            x_next = sorted_x_positions[x_idx + 1]
+
+            # Get all curves that have landings at BOTH positions
+            curves_at_both = []
+            for curve_name in curve_names:
+                if x_current in curve_landing_indices[curve_name] and \
+                   x_next in curve_landing_indices[curve_name]:
+                    curves_at_both.append(curve_name)
+
+            if len(curves_at_both) < 2:
+                continue
+
+            # Get Y values at current and next position for these curves
+            y_current = {}
+            y_next = {}
+            note_current = {}
+            note_next = {}
+            for curve_name in curves_at_both:
+                idx_current = curve_landing_indices[curve_name][x_current]
+                idx_next = curve_landing_indices[curve_name][x_next]
+                y_current[curve_name] = curves_data[curve_name]['points'][idx_current]['y']
+                y_next[curve_name] = curves_data[curve_name]['points'][idx_next]['y']
+                note_current[curve_name] = curves_data[curve_name]['points'][idx_current].get('note', 0)
+                note_next[curve_name] = curves_data[curve_name]['points'][idx_next].get('note', 0)
+
+            # Check for crossings: curves whose relative Y order changes
+            for i, curve_a in enumerate(curves_at_both):
+                for curve_b in curves_at_both[i+1:]:
+                    # Compare relative positions (with small tolerance)
+                    y_diff_current = y_current[curve_a] - y_current[curve_b]
+                    y_diff_next = y_next[curve_a] - y_next[curve_b]
+
+                    # A crossing occurs if the sign of the Y difference changes
+                    # (i.e., curve A was above B but is now below, or vice versa)
+                    TOLERANCE = 0.001
+                    if abs(y_diff_current) > TOLERANCE and abs(y_diff_next) > TOLERANCE:
+                        a_above_b_current = y_diff_current > 0
+                        a_above_b_next = y_diff_next > 0
+
+                        if a_above_b_current != a_above_b_next:
+                            # Crossing detected!
+                            # Find the divergence point by working backwards
+                            divergence_x = find_divergence_point(
+                                curves_data, curve_a, curve_b,
+                                x_current, sorted_x_positions[:x_idx+1],
+                                curve_landing_indices
+                            )
+
+                            if divergence_x is not None:
+                                # Swap the curve paths from AFTER divergence_x to x_next
+                                # We don't swap AT divergence_x because that's where they're together
+                                swap_start_idx = sorted_x_positions.index(divergence_x) + 1
+                                if swap_start_idx <= x_idx + 1:
+                                    swap_start_x = sorted_x_positions[swap_start_idx]
+                                    swapped = swap_curve_paths(
+                                        curves_data, curve_a, curve_b,
+                                        swap_start_x, x_next,
+                                        sorted_x_positions, curve_landing_indices
+                                    )
+                                    if swapped:
+                                        swap_count += 1
+                                        crossings_fixed_this_pass += 1
+                                        # Rebuild indices after swap
+                                        curve_landing_indices = build_landing_index(curves_data, curve_names)
+
+        if crossings_fixed_this_pass == 0:
+            break  # No more crossings to fix
+
+    # Recalculate peak Y values after all swaps
+    recalculate_peak_y_values(curves_data, curve_names)
+
+    return swap_count
+
+
+def find_divergence_point(curves_data, curve_a, curve_b, current_x, prior_x_positions, curve_landing_indices):
+    """
+    Find the X position where curve_a and curve_b diverged from a common path.
+
+    We work backwards through prior_x_positions to find where both curves
+    were at the same Y position (landing on the same note). This is the point
+    from which we should swap their paths.
+
+    Args:
+        curves_data: Dict of curve data
+        curve_a, curve_b: Names of the two curves that are crossing
+        current_x: The X position where we detected the crossing
+        prior_x_positions: List of X positions before and including current_x
+        curve_landing_indices: Mapping of curve_name -> x_pos -> point_index
+
+    Returns:
+        The X position where divergence occurred, or None if not found
+    """
+    Y_TOLERANCE = 0.01  # How close Y values need to be to be considered "same position"
+
+    # Work backwards through prior X positions
+    for x_pos in reversed(prior_x_positions):
+        # Check if both curves have landings at this position
+        if x_pos not in curve_landing_indices[curve_a] or \
+           x_pos not in curve_landing_indices[curve_b]:
+            continue
+
+        idx_a = curve_landing_indices[curve_a][x_pos]
+        idx_b = curve_landing_indices[curve_b][x_pos]
+        y_a = curves_data[curve_a]['points'][idx_a]['y']
+        y_b = curves_data[curve_b]['points'][idx_b]['y']
+
+        # If they're at the same Y position, this is where they were together
+        if abs(y_a - y_b) < Y_TOLERANCE:
+            return x_pos
+
+        # Also check if they're on the same MIDI note
+        note_a = curves_data[curve_a]['points'][idx_a].get('note', -1)
+        note_b = curves_data[curve_b]['points'][idx_b].get('note', -1)
+        if note_a == note_b and note_a != -1:
+            return x_pos
+
+    # If we didn't find a clear divergence point, return the earliest position
+    # where both curves have landings
+    for x_pos in prior_x_positions:
+        if x_pos in curve_landing_indices[curve_a] and \
+           x_pos in curve_landing_indices[curve_b]:
+            return x_pos
+
+    return None
+
+
+def swap_curve_paths(curves_data, curve_a, curve_b, start_x, end_x, sorted_x_positions, curve_landing_indices):
+    """
+    Swap the paths of curve_a and curve_b from start_x to end_x (inclusive).
+
+    This swaps all point data (x, y, svgX, svgY, note, noteName) between
+    the two curves for all landing points in the specified range.
+    Also swaps the associated peak points.
+
+    Args:
+        curves_data: Dict of curve data (modified in place)
+        curve_a, curve_b: Names of the two curves to swap
+        start_x: X position to start swapping (inclusive)
+        end_x: X position to end swapping (inclusive)
+        sorted_x_positions: All X positions in chronological order
+        curve_landing_indices: Mapping of curve_name -> x_pos -> point_index
+
+    Returns:
+        True if swap was performed, False otherwise
+    """
+    # Find the X positions in the swap range
+    swap_x_positions = [x for x in sorted_x_positions if start_x <= x <= end_x]
+
+    if not swap_x_positions:
+        return False
+
+    points_a = curves_data[curve_a]['points']
+    points_b = curves_data[curve_b]['points']
+
+    # For each X position in the range, swap the landing point data
+    for x_pos in swap_x_positions:
+        if x_pos not in curve_landing_indices[curve_a] or \
+           x_pos not in curve_landing_indices[curve_b]:
+            continue
+
+        idx_a = curve_landing_indices[curve_a][x_pos]
+        idx_b = curve_landing_indices[curve_b][x_pos]
+
+        # Swap the key landing point attributes
+        for key in ['y', 'svgY', 'note', 'noteName']:
+            points_a[idx_a][key], points_b[idx_b][key] = \
+                points_b[idx_b][key], points_a[idx_a][key]
+
+        # Also swap the arc_peak point that precedes this landing (if exists)
+        # The arc_peak is typically at idx - 1
+        if idx_a > 0 and points_a[idx_a - 1].get('pointType') == 'arc_peak' and \
+           idx_b > 0 and points_b[idx_b - 1].get('pointType') == 'arc_peak':
+            peak_idx_a = idx_a - 1
+            peak_idx_b = idx_b - 1
+            for key in ['y', 'svgY', 'noteName']:
+                points_a[peak_idx_a][key], points_b[peak_idx_b][key] = \
+                    points_b[peak_idx_b][key], points_a[peak_idx_a][key]
+
+    return True
+
+
 def set_up_collection(collection_name):
     """
     Set up the collection for curves.
@@ -577,6 +839,11 @@ def main():
     print(f"\nPreventing curve crossings in X-Y plane...")
     swap_count = prevent_curve_crossings(curves_data)
     print(f"  Performed Y-value adjustments at {swap_count} X positions")
+
+    # Step 2b: Optimize path grouping to prevent visual crossovers
+    print(f"\nOptimizing path grouping to prevent visual crossovers...")
+    path_swap_count = optimize_path_grouping(curves_data)
+    print(f"  Performed {path_swap_count} path swaps to fix crossovers")
 
     # Step 3: Set up collection
     collection_name = config.get('collectionName', 'Note Jumping Curves')
