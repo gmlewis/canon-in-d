@@ -21,7 +21,13 @@ COLLECTION_NAME = "Note Jumping Curves"
 PARENT_NAME = "Note Jumping Curves Parent"
 MAX_JUMPING_CURVE_Z_OFFSET = 1.0  # Height of the arc peak between notes
 
+# Scale factors to convert SVG coordinates to Blender units (meters)
+# SVG coordinates are in pixels, Blender uses meters by default
+X_SCALE = 0.01  # 1 SVG pixel = 0.01 meters (1 cm)
+Y_SCALE = 0.01  # 1 SVG pixel = 0.01 meters (1 cm)
+
 # How much to offset the final X position (for the "fly off" at end of song)
+# This is in SVG units, will be scaled by X_SCALE
 END_X_OFFSET = 500
 
 
@@ -273,30 +279,37 @@ def generate_bezier_points(curves, z_offset):
 
         for i, point in enumerate(landing_points):
             # Landing point (on the note, Z=0)
+            # Apply scale factors to convert SVG coordinates to Blender units
             landing = {
-                'x': point['svgX'],
-                'y': point['svgY'],
+                'x': point['svgX'] * X_SCALE,
+                'y': point['svgY'] * Y_SCALE,
                 'z': 0.0,
                 'type': 'landing',
                 'noteName': point['noteName'],
                 'note': point['note'],
                 'timestamp': point['timestamp'],
-                'pointType': point['pointType']
+                'pointType': point['pointType'],
+                'svgX': point['svgX'],  # Keep original SVG coords for debugging
+                'svgY': point['svgY']
             }
             bezier_points.append(landing)
 
             # Add peak point between this landing and the next (if not last)
             if i < len(landing_points) - 1:
                 next_point = landing_points[i + 1]
+                mid_svg_x = (point['svgX'] + next_point['svgX']) / 2.0
+                mid_svg_y = (point['svgY'] + next_point['svgY']) / 2.0
                 peak = {
-                    'x': (point['svgX'] + next_point['svgX']) / 2.0,
-                    'y': (point['svgY'] + next_point['svgY']) / 2.0,
+                    'x': mid_svg_x * X_SCALE,
+                    'y': mid_svg_y * Y_SCALE,
                     'z': z_offset,
                     'type': 'peak',
                     'noteName': f"{point['noteName']} -> {next_point['noteName']}",
                     'note': None,
                     'timestamp': (point['timestamp'] + next_point['timestamp']) / 2.0,
-                    'pointType': 'arc_peak'
+                    'pointType': 'arc_peak',
+                    'svgX': mid_svg_x,  # Keep original SVG coords for debugging
+                    'svgY': mid_svg_y
                 }
                 bezier_points.append(peak)
 
@@ -362,6 +375,8 @@ def main():
             'collectionName': COLLECTION_NAME,
             'parentName': PARENT_NAME,
             'maxJumpingCurveZOffset': MAX_JUMPING_CURVE_Z_OFFSET,
+            'xScale': X_SCALE,
+            'yScale': Y_SCALE,
             'curveResolution': 12,
             'handleType': 'AUTO'
         },
