@@ -755,8 +755,8 @@ def build_curve_data(data, max_curves):
             # This ensures curves distribute: curve1 takes lowest, curve2 takes next lowest, etc.
             best_landing = None
 
-            # DEBUG: trace t=241.8 (last 4-note chord) and t=9.6 (where violation starts)
-            debug_this = abs(current_time - 241.798) < 0.01 or abs(current_time - 9.6) < 0.01
+            # DEBUG: trace t=241.8 (last 4-note chord) and t=9.6 (where violation starts) and t=19.5
+            debug_this = abs(current_time - 241.798) < 0.01 or abs(current_time - 9.6) < 0.01 or abs(current_time - 19.5) < 0.01
 
             # Get the maximum bY of all lower-numbered curves at this time
             # We want to pick bY >= this value (with preference for strictly greater)
