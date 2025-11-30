@@ -147,11 +147,13 @@ def prevent_curve_crossings(curves_data):
 
 def recalculate_peak_y_values(curves_data, curve_names):
     """
-    Recalculate Y values for all arc_peak points based on their adjacent landings.
+    Recalculate X and Y values for all arc_peak points based on their adjacent landings.
 
-    After landing Y values have been swapped to prevent crossings, the peak Y values
-    must be recalculated as the exact midpoint of the previous and next landing Y values.
+    After landing positions have been swapped to prevent crossings, the peak X and Y values
+    must be recalculated as the exact midpoint of the previous and next landing positions.
     This ensures peaks remain at the geometric midpoint for orthographic top-view alignment.
+
+    NOTE: Z values are NOT changed - they represent the arc height and should stay fixed.
 
     Args:
         curves_data: Dict of curve data (modified in place)
@@ -183,9 +185,19 @@ def recalculate_peak_y_values(curves_data, curve_names):
             if prev_landing is None or next_landing is None:
                 continue
 
+            # Recalculate X as the exact midpoint of the two landings
+            new_x = (prev_landing['x'] + next_landing['x']) / 2.0
+            point['x'] = new_x
+
             # Recalculate Y as the exact midpoint of the two landings
             new_y = (prev_landing['y'] + next_landing['y']) / 2.0
             point['y'] = new_y
+
+            # Also update svgX and svgY to match
+            if 'svgX' in prev_landing and 'svgX' in next_landing:
+                point['svgX'] = (prev_landing['svgX'] + next_landing['svgX']) / 2.0
+            if 'svgY' in prev_landing and 'svgY' in next_landing:
+                point['svgY'] = (prev_landing['svgY'] + next_landing['svgY']) / 2.0
 
 
 def optimize_path_grouping(curves_data):
