@@ -721,9 +721,10 @@ def build_curve_data(data, max_curves):
     notes_covered = set()
     times_to_process = sorted(note_on_times)
 
-    RANK_WEIGHT = 5.0
+    RANK_WEIGHT = 12.0
     MOVE_WEIGHT = 1.0
-    USAGE_WEIGHT = 8.0
+    USAGE_WEIGHT = 12.0
+    COVERED_PENALTY = 25.0
 
     for curve_idx, curve_name in enumerate(curve_names):
         curve_landings = []
@@ -763,9 +764,11 @@ def build_curve_data(data, max_curves):
                 rank_score = abs(rank - target_rank)
                 move_score = abs(bY - current_bY) if current_bY is not None else 0.0
                 usage_score = note_usage_counts[note_key]
+                covered_penalty = COVERED_PENALTY if note_key in notes_covered else 0.0
                 total_score = (rank_score * RANK_WEIGHT) + \
                               (move_score * MOVE_WEIGHT) + \
-                              (usage_score * USAGE_WEIGHT)
+                              (usage_score * USAGE_WEIGHT) + \
+                              covered_penalty
 
                 if total_score < best_score:
                     best_score = total_score
