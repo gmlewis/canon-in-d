@@ -766,9 +766,6 @@ def build_curve_data(data, max_curves):
             # This ensures curves distribute: curve1 takes lowest, curve2 takes next lowest, etc.
             best_landing = None
 
-            # DEBUG: trace key timestamps
-            debug_this = abs(current_time - 241.798) < 0.01 or abs(current_time - 9.6) < 0.01 or abs(current_time - 19.5) < 0.01 or abs(current_time - 19.2) < 0.01 or abs(current_time - 19.8) < 0.01
-
             # Get the maximum bY of all lower-numbered curves at this time
             # We want to pick bY >= this value (with preference for strictly greater)
             max_prev_bY = 0.0
@@ -786,31 +783,19 @@ def build_curve_data(data, max_curves):
             equal_or_greater_best = None
 
             for note, svgX, svgY, bY, noteName, end_t in notes_available:
-                if debug_this:
-                    print(f"DEBUG {curve_name} t={current_time:.3f}: checking note={noteName} bY={bY:.4f} max_prev_bY={max_prev_bY:.4f}")
-
                 if current_note is None:
                     # First landing (at end of song), check if valid
                     valid = is_position_valid(curve_idx, bY, current_time, bY, current_time,
                                         completed_curves)
-                    if debug_this:
-                        print(f"  -> first landing valid={valid}")
                     if valid:
                         # Check for strictly greater option
                         if bY > max_prev_bY + 0.01:  # strictly greater with tolerance
                             if strictly_greater_best is None or bY < strictly_greater_best[3]:
                                 strictly_greater_best = (note, svgX, svgY, bY, noteName, end_t)
-                                if debug_this:
-                                    print(f"  -> strictly_greater_best = {noteName}")
                         # Also track equal-or-greater option
                         if bY >= max_prev_bY - 0.001:
                             if equal_or_greater_best is None or bY < equal_or_greater_best[3]:
                                 equal_or_greater_best = (note, svgX, svgY, bY, noteName, end_t)
-                                if debug_this:
-                                    print(f"  -> equal_or_greater_best = {noteName}")
-                    else:
-                        if debug_this:
-                            print(f"  -> REJECTED by is_position_valid")
                 else:
                     # Check if arc from this origin to current destination is valid
                     dest_time = None
@@ -823,8 +808,6 @@ def build_curve_data(data, max_curves):
 
                     valid = is_position_valid(curve_idx, bY, current_time, current_bY, dest_time,
                                         completed_curves)
-                    if debug_this:
-                        print(f"  -> arc from bY={bY:.4f} at t={current_time:.2f} to bY={current_bY:.4f} at t={dest_time:.2f}: valid={valid}")
                     if valid:
                         # Check for strictly greater option
                         if bY > max_prev_bY + 0.01:
@@ -844,8 +827,6 @@ def build_curve_data(data, max_curves):
             if best_landing is None:
                 # No valid position found - SKIP this landing entirely
                 # The curve will continue on its previous note (or from the next future landing)
-                if debug_this:
-                    print(f"  -> SKIPPING t={current_time:.2f} for {curve_name} - no valid note")
                 continue
 
             note, svgX, svgY, bY, noteName, end_t = best_landing
