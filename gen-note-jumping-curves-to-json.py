@@ -668,7 +668,17 @@ def build_curve_data(data, max_curves):
     # Format: (note, svgX, svgY, bY, noteName, end_time)
     # We keep both svgY (for output) and bY (for all logic)
     notes_at_time = {}
+    skipped_no_svg = 0
     for t, note, event in note_on_events:
+        svgX = event.get('svgX', 0)
+        svgY = event.get('svgY', 0)
+        
+        # Skip notes that don't have valid SVG coordinates
+        # These are MIDI notes that couldn't be matched to SVG note heads
+        if svgX == 0 and svgY == 0:
+            skipped_no_svg += 1
+            continue
+            
         if t not in notes_at_time:
             notes_at_time[t] = []
         # Find end time for this note
@@ -678,8 +688,6 @@ def build_curve_data(data, max_curves):
                 end_t = et
                 break
 
-        svgX = event.get('svgX', 0)
-        svgY = event.get('svgY', 0)
         # Convert to Blender Y - THIS IS THE KEY TRANSFORMATION
         _, bY = svg_to_blender(svgX, svgY)
 
@@ -691,6 +699,9 @@ def build_curve_data(data, max_curves):
             event.get('name', ''),
             end_t
         ))
+    
+    if skipped_no_svg > 0:
+        print(f"  Skipped {skipped_no_svg} notes without SVG coordinates")
 
     # Sort notes at each time by bY ASCENDING (lowest bY first = curve1's preferred slot)
     for t in notes_at_time:
