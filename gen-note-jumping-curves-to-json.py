@@ -707,137 +707,115 @@ def build_curve_data(data, max_curves):
     for t in notes_at_time:
         notes_at_time[t].sort(key=lambda x: x[3])  # Sort by bY ascending
 
-    # === STEP 2: Trace each curve one at a time ===
-    # curve1 gets lowest bY, curve2 next lowest, etc.
+    # === STEP 2: Trace each curve one at a time, FORWARD through time ===
     #
-    # Each curve picks the LOWEST valid bY that is STRICTLY GREATER than
-    # all lower-numbered curves' bY at that time. If no strictly greater
-    # option exists, it picks the lowest valid bY (allowing equality).
-    # This maintains Y-ordering while distributing curves when possible.
+    # NEW ALGORITHM: Process FORWARD to properly respect note durations.
+    #
+    # For each curve:
+    # 1. Start at t=0, land on the first available note
+    # 2. STAY on that note until its noteOff time
+    # 3. At noteOff time, jump to the next available note
+    # 4. Continue until the end of the piece
+    #
+    # Curves are processed in order (curve1 first), and each curve picks
+    # notes that maintain the Y-ordering invariant.
 
     completed_curves = {}  # curve_name -> [(time, note, svgX, svgY, bY, noteName), ...]
 
     for curve_idx, curve_name in enumerate(curve_names):
-        # Trace this curve from END to START
         curve_landings = []
 
-        # Current state: which note is this curve on, and what's its bY?
+        # Current state
         current_note = None
+        current_note_end = 0.0
         current_bY = None
-        current_end_time = end_time
+        current_svgX = None
+        current_svgY = None
+        current_noteName = None
 
-        # Process timestamps from end to start
-        times_to_process = sorted(note_on_times, reverse=True)
+        # Process timestamps in FORWARD order
+        times_to_process = sorted(note_on_times)
 
         for current_time in times_to_process:
             notes_available = notes_at_time.get(current_time, [])
             if not notes_available:
                 continue
 
-            # Do we need to land at this time?
+            # Check if we need to land at this time
             need_landing = False
+
             if current_note is None:
+                # First landing - always needed
+                need_landing = True
+            elif current_time >= current_note_end - 0.01:
+                # Our current note has ended - need to find a new one
                 need_landing = True
             else:
-                # Check if current_note started at current_time
+                # Check if one of the available notes is our current note starting again
+                # (same note can have multiple instances)
                 for note, svgX, svgY, bY, noteName, end_t in notes_available:
-                    if note == current_note:
-                        need_landing = True
+                    if note == current_note and abs(current_time - current_note_end) < 0.05:
+                        # Same note restarts - stay on it
+                        current_note_end = end_t
                         break
-
-            if not need_landing:
-                # Check if our current note was still available (active) at this time
-                note_was_active = False
-                for s, e in note_instances.get(current_note, []):
-                    if s <= current_time < e:
-                        note_was_active = True
-                        break
-                if not note_was_active:
-                    need_landing = True
 
             if not need_landing:
                 continue
 
-            # Find the best landing position at this time
-            # We want the LOWEST bY that:
-            # 1. Maintains the invariant (bY >= all lower curves' bY)
-            # 2. Is NOT already claimed by a lower-numbered curve at this timestamp
-            #
-            # This ensures curves distribute: curve1 takes lowest, curve2 takes next lowest, etc.
-            best_landing = None
+            # Find the best note to land on at this time
+            # Must satisfy Y-ordering: this curve's bY >= all lower curves' bY
 
             # Get the maximum bY of all lower-numbered curves at this time
-            # We want to pick bY >= this value (with preference for strictly greater)
             max_prev_bY = 0.0
             for prev_curve_name, prev_landings in completed_curves.items():
                 prev_bY = get_curve_bY_at_time(prev_landings, current_time)
                 if prev_bY is not None and prev_bY > max_prev_bY:
                     max_prev_bY = prev_bY
 
-            # First pass: find the lowest bY that is STRICTLY GREATER than max_prev_bY
-            # This distributes curves across different notes when possible
+            # Find the best note: LOWEST bY that is >= max_prev_bY
+            # Prefer strictly greater to spread curves across notes
+            best_landing = None
             strictly_greater_best = None
-
-            # Second pass: find the lowest bY that is >= max_prev_bY (allows equality)
-            # This is used when no strictly greater option is valid
             equal_or_greater_best = None
 
             for note, svgX, svgY, bY, noteName, end_t in notes_available:
+                # Check validity of the arc from current position to this note
                 if current_note is None:
-                    # First landing (at end of song), check if valid
                     valid = is_position_valid(curve_idx, bY, current_time, bY, current_time,
-                                        completed_curves)
-                    if valid:
-                        # Check for strictly greater option
-                        if bY > max_prev_bY + 0.01:  # strictly greater with tolerance
-                            if strictly_greater_best is None or bY < strictly_greater_best[3]:
-                                strictly_greater_best = (note, svgX, svgY, bY, noteName, end_t)
-                        # Also track equal-or-greater option
-                        if bY >= max_prev_bY - 0.001:
-                            if equal_or_greater_best is None or bY < equal_or_greater_best[3]:
-                                equal_or_greater_best = (note, svgX, svgY, bY, noteName, end_t)
+                                              completed_curves)
                 else:
-                    # Check if arc from this origin to current destination is valid
-                    dest_time = None
-                    for landing in curve_landings:
-                        if landing[0] > current_time:
-                            if dest_time is None or landing[0] < dest_time:
-                                dest_time = landing[0]
-                    if dest_time is None:
-                        dest_time = current_time
+                    valid = is_position_valid(curve_idx, current_bY, curve_landings[-1][0] if curve_landings else current_time,
+                                              bY, current_time, completed_curves)
 
-                    valid = is_position_valid(curve_idx, bY, current_time, current_bY, dest_time,
-                                        completed_curves)
-                    if valid:
-                        # Check for strictly greater option
-                        if bY > max_prev_bY + 0.01:
-                            if strictly_greater_best is None or bY < strictly_greater_best[3]:
-                                strictly_greater_best = (note, svgX, svgY, bY, noteName, end_t)
-                        # Also track equal-or-greater option
-                        if bY >= max_prev_bY - 0.001:
-                            if equal_or_greater_best is None or bY < equal_or_greater_best[3]:
-                                equal_or_greater_best = (note, svgX, svgY, bY, noteName, end_t)
+                if valid:
+                    if bY > max_prev_bY + 0.01:
+                        if strictly_greater_best is None or bY < strictly_greater_best[3]:
+                            strictly_greater_best = (note, svgX, svgY, bY, noteName, end_t)
+                    if bY >= max_prev_bY - 0.001:
+                        if equal_or_greater_best is None or bY < equal_or_greater_best[3]:
+                            equal_or_greater_best = (note, svgX, svgY, bY, noteName, end_t)
 
-            # Prefer strictly greater bY (distributes curves), fall back to equal-or-greater
+            # Prefer strictly greater, fall back to equal-or-greater
             if strictly_greater_best is not None:
                 best_landing = strictly_greater_best
             elif equal_or_greater_best is not None:
                 best_landing = equal_or_greater_best
 
             if best_landing is None:
-                # No valid position found - SKIP this landing entirely
-                # The curve will continue on its previous note (or from the next future landing)
+                # No valid note found - skip this timestamp
+                # (curve stays in flight until a valid note appears)
                 continue
 
             note, svgX, svgY, bY, noteName, end_t = best_landing
             curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
 
             current_note = note
+            current_note_end = end_t
             current_bY = bY
-            current_end_time = end_t
+            current_svgX = svgX
+            current_svgY = svgY
+            current_noteName = noteName
 
-        # Reverse to get chronological order
-        curve_landings.reverse()
         completed_curves[curve_name] = curve_landings
 
     # === STEP 3: Build final curve data ===
