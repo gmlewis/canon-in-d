@@ -671,6 +671,7 @@ def build_curve_data(data, max_curves):
     notes_at_time = {}
     all_note_keys = set()
     note_usage_counts = defaultdict(int)
+    note_lookup = {}
     skipped_no_svg = 0
     for t, note, event in note_on_events:
         svgX = event.get('svgX', 0)
@@ -705,6 +706,15 @@ def build_curve_data(data, max_curves):
 
         note_key = (round(t, 5), note)
         all_note_keys.add(note_key)
+        note_lookup[note_key] = {
+            'time': t,
+            'noteName': event.get('name', ''),
+            'note': note,
+            'svgX': svgX,
+            'svgY': svgY,
+            'bY': bY,
+            'end_t': end_t
+        }
 
     if skipped_no_svg > 0:
         print(f"  Skipped {skipped_no_svg} notes without SVG coordinates")
@@ -788,11 +798,17 @@ def build_curve_data(data, max_curves):
 
         completed_curves[curve_name] = curve_landings
 
-    missing_notes = len(all_note_keys - notes_covered)
+    missing_set = all_note_keys - notes_covered
+    missing_notes = len(missing_set)
     if missing_notes > 0:
         coverage_percent = (len(notes_covered) / len(all_note_keys)) * 100 if all_note_keys else 0
         print(f"  WARNING: {missing_notes} matched notes not covered by any curve "
               f"({coverage_percent:.1f}% coverage)")
+        sample = list(missing_set)[:5]
+        for key in sample:
+            info = note_lookup.get(key)
+            if info:
+                print(f"    Missing note {info['noteName']} (MIDI {info['note']}) at t={info['time']:.3f}s")
 
     # === STEP 3: Build final curve data ===
     # Convert back to the output format (keeping both SVG and Blender coords for flexibility)
