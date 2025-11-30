@@ -68,6 +68,206 @@ class TestCurveGenerator(unittest.TestCase):
         ratio = (t - prev[0]) / (next_l[0] - prev[0])
         return prev[1] + ratio * (next_l[1] - prev[1])
 
+class TestCurvesPre180(unittest.TestCase):
+    """Regression tests ensuring behavior up to note_x105151_B3_t180p90_1217 stays solid."""
+
+    JSON_FILE = "note-jumping-curves.json"
+    MIDI_FILE = "CanonInD.json"
+    THRESHOLD = 180.9  # Seconds
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.JSON_FILE, 'r') as f:
+            cls.curves_data = json.load(f)
+        cls.curves = cls.curves_data.get('curves', {})
+        cls.curve_names = ['curve1', 'curve2', 'curve3', 'curve4', 'curve5', 'curve6', 'curve7']
+
+        with open(cls.MIDI_FILE, 'r') as f:
+            cls.midi_data = json.load(f)
+
+        cls.landings = set()
+        for cn in cls.curve_names:
+            for p in cls.curves.get(cn, {}).get('points', []):
+                if p.get('type') == 'landing':
+                    cls.landings.add((round(p['timestamp'], 3), p.get('noteName', '')))
+
+    def get_svgY_at_time(self, points, t):
+        landings = [(p['timestamp'], p['svgY']) for p in points
+                    if p.get('type') in ['landing', 'fly_in']]
+        if not landings:
+            return None
+
+        landings.sort()
+        prev = None
+        next_l = None
+        for lt, ly in landings:
+            if lt <= t:
+                prev = (lt, ly)
+            if lt >= t and next_l is None:
+                next_l = (lt, ly)
+
+        if prev is None:
+            return landings[0][1]
+        if next_l is None:
+            return landings[-1][1]
+        if prev[0] == next_l[0]:
+            return prev[1]
+
+        ratio = (t - prev[0]) / (next_l[0] - prev[0])
+        return prev[1] + ratio * (next_l[1] - prev[1])
+
+    def test_pre180_all_midi_notes_are_hit(self):
+        """Every noteOn event up to t=180.9s should have a landing."""
+        missing = []
+        for ev in self.midi_data[0]:
+            if ev.get('type') != 'noteOn':
+                continue
+            t = round(ev.get('time', 0.0), 3)
+            if t > self.THRESHOLD:
+                continue
+            key = (t, ev.get('name', ''))
+            if key not in self.landings:
+                missing.append(key)
+
+        self.assertEqual(
+            [],
+            missing,
+            f"Found {len(missing)} noteOn events before {self.THRESHOLD}s without landings"
+        )
+
+    def test_pre180_ordering_invariant_holds(self):
+        """Ensure no Y-order violations occur before the problem note."""
+        all_times = set()
+        for cn in self.curve_names:
+            for p in self.curves.get(cn, {}).get('points', []):
+                t = p.get('timestamp')
+                if t is None or t > self.THRESHOLD + 1e-6:
+                    continue
+                all_times.add(round(t, 4))
+
+        violations = []
+        for t in sorted(all_times):
+            svgYs = []
+            for cn in self.curve_names:
+                points = self.curves.get(cn, {}).get('points', [])
+                y = self.get_svgY_at_time(points, t)
+                if y is not None:
+                    svgYs.append((cn, y))
+
+            for i in range(len(svgYs) - 1):
+                if svgYs[i][1] < svgYs[i + 1][1] - 0.01:
+                    violations.append({
+                        'time': t,
+                        'curve_above': svgYs[i][0],
+                        'svgY_above': svgYs[i][1],
+                        'curve_below': svgYs[i + 1][0],
+                        'svgY_below': svgYs[i + 1][1]
+                    })
+
+        self.assertEqual(0, len(violations), f"Ordering violated before {self.THRESHOLD}s")
+
+
+class TestCurvesPost180(unittest.TestCase):
+    """Tests that currently fail due to regressions after note_x105151..."""
+
+    JSON_FILE = "note-jumping-curves.json"
+    MIDI_FILE = "CanonInD.json"
+    THRESHOLD = 180.9
+    CRITICAL_TIMES = {
+        215.1: ['C#3'],
+        220.5: ['C#4'],
+        223.5: ['F#3'],
+        229.5: ['E3'],
+        241.818: ['F#4']
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.JSON_FILE, 'r') as f:
+            cls.curves_data = json.load(f)
+        cls.curves = cls.curves_data.get('curves', {})
+        cls.curve_names = ['curve1', 'curve2', 'curve3', 'curve4', 'curve5', 'curve6', 'curve7']
+
+        with open(cls.MIDI_FILE, 'r') as f:
+            cls.midi_data = json.load(f)
+
+        cls.landings = set()
+        for cn in cls.curve_names:
+            for p in cls.curves.get(cn, {}).get('points', []):
+                if p.get('type') == 'landing':
+                    cls.landings.add((round(p['timestamp'], 3), p.get('noteName', '')))
+
+    def get_svgY_at_time(self, points, t):
+        landings = [(p['timestamp'], p['svgY']) for p in points
+                    if p.get('type') in ['landing', 'fly_in']]
+        if not landings:
+            return None
+
+        landings.sort()
+        prev = None
+        next_l = None
+        for lt, ly in landings:
+            if lt <= t:
+                prev = (lt, ly)
+            if lt >= t and next_l is None:
+                next_l = (lt, ly)
+
+        if prev is None:
+            return landings[0][1]
+        if next_l is None:
+            return landings[-1][1]
+        if prev[0] == next_l[0]:
+            return prev[1]
+
+        ratio = (t - prev[0]) / (next_l[0] - prev[0])
+        return prev[1] + ratio * (next_l[1] - prev[1])
+
+    def test_post180_critical_notes_are_hit(self):
+        """Critical mid- and late-section notes must have landings (currently failing)."""
+        missing = []
+        for time_key, expected_notes in self.CRITICAL_TIMES.items():
+            for note_name in expected_notes:
+                key = (round(time_key, 3), note_name)
+                if key not in self.landings:
+                    missing.append(key)
+
+        self.assertEqual(
+            [],
+            missing,
+            "Missing landings for critical notes after 180.9s"
+        )
+
+    def test_post180_ordering_restriction(self):
+        """Curves should remain ordered after the problem note (currently violated)."""
+        all_times = set()
+        for cn in self.curve_names:
+            for p in self.curves.get(cn, {}).get('points', []):
+                t = p.get('timestamp')
+                if t is None or t < self.THRESHOLD - 1e-6:
+                    continue
+                all_times.add(round(t, 4))
+
+        violations = []
+        for t in sorted(all_times):
+            svgYs = []
+            for cn in self.curve_names:
+                points = self.curves.get(cn, {}).get('points', [])
+                y = self.get_svgY_at_time(points, t)
+                if y is not None:
+                    svgYs.append((cn, y))
+
+            for i in range(len(svgYs) - 1):
+                if svgYs[i][1] < svgYs[i + 1][1] - 0.01:
+                    violations.append({
+                        'time': t,
+                        'curve_above': svgYs[i][0],
+                        'svgY_above': svgYs[i][1],
+                        'curve_below': svgYs[i + 1][0],
+                        'svgY_below': svgYs[i + 1][1]
+                    })
+
+        self.assertEqual(0, len(violations), "Ordering violated after 180.9s")
+
     # =========================================================================
     # TEST: Basic structure
     # =========================================================================
