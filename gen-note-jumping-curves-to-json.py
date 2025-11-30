@@ -422,9 +422,16 @@ def assign_svg_coords_to_notes(data, svg_centers):
     """
     Assign SVG coordinates from the extracted SVG path centers to noteOn events.
 
-    This matches noteOn events with SVG path centers using chord-aware sorting:
-    - Notes grouped by timestamp, SVG paths grouped by X (within tolerance)
-    - Within each chord, matched by pitch order (high to low) = Y order (top to bottom)
+    This matches noteOn events with SVG path centers using CHORD-BY-CHORD matching:
+    1. Group MIDI notes by timestamp (chord groups)
+    2. Group SVG centers by X position (chord groups)
+    3. Match chord groups 1-to-1 in order (first MIDI chord → first SVG chord, etc.)
+    4. Within each matched chord pair, match by pitch/Y order:
+       - MIDI notes sorted by descending pitch (highest first)
+       - SVG centers sorted by ascending Y (top first = highest pitch)
+
+    This handles cases where SVG has extra notes (e.g., ornaments not in MIDI)
+    by ensuring each chord's notes are matched correctly regardless of global count.
 
     Modifies the noteOn events in place, updating their 'svgX' and 'svgY' fields.
     Returns the number of notes matched.
@@ -440,35 +447,59 @@ def assign_svg_coords_to_notes(data, svg_centers):
             if isinstance(event, dict) and event.get('type') == 'noteOn':
                 note_on_events.append(event)
 
-    # Group notes by timestamp to identify chords
+    # Group notes by timestamp to identify MIDI chords
     time_groups = defaultdict(list)
     for note in note_on_events:
         time_groups[note.get('time', 0)].append(note)
 
-    # Build final sorted list:
-    # - Groups sorted by time (chronological)
-    # - Within each group, sorted by DESCENDING note (higher pitch first)
-    #   This matches SVG Y order where lower Y = higher pitch
-    sorted_notes = []
+    # Build list of MIDI chord groups (sorted by time)
+    # Each chord group contains notes sorted by descending pitch (highest first)
+    midi_chord_groups = []
     for time in sorted(time_groups.keys()):
         group = time_groups[time]
         group_sorted = sorted(group, key=lambda n: -n.get('note', 0))  # Descending pitch
-        sorted_notes.extend(group_sorted)
+        midi_chord_groups.append((time, group_sorted))
 
-    if len(sorted_notes) != len(svg_centers):
-        print(f"WARNING: Note count mismatch!")
-        print(f"  noteOn events: {len(sorted_notes)}")
-        print(f"  SVG note heads: {len(svg_centers)}")
-        print("  Will match as many as possible...")
+    # Group SVG centers by X position to identify SVG chords
+    svg_chord_groups = group_by_x_tolerance(svg_centers, lambda c: c[0], tolerance=15.0)
+    # Within each SVG chord, sort by ascending Y (top to bottom = high to low pitch)
+    for i, group in enumerate(svg_chord_groups):
+        svg_chord_groups[i] = sorted(group, key=lambda c: c[1])
 
-    # Match events to SVG centers 1-to-1
+    print(f"  MIDI chord groups: {len(midi_chord_groups)}")
+    print(f"  SVG chord groups: {len(svg_chord_groups)}")
+
+    if len(midi_chord_groups) != len(svg_chord_groups):
+        print(f"  WARNING: Chord group count mismatch!")
+        print(f"    Will match as many chord groups as possible...")
+
+    # Match chord groups 1-to-1
     matched = 0
-    for i, event in enumerate(sorted_notes):
-        if i < len(svg_centers):
-            svg_x, svg_y = svg_centers[i]
-            event['svgX'] = svg_x
-            event['svgY'] = svg_y
-            matched += 1
+    total_chord_mismatches = 0
+    for i, (midi_time, midi_notes) in enumerate(midi_chord_groups):
+        if i >= len(svg_chord_groups):
+            print(f"  WARNING: Ran out of SVG chord groups at MIDI chord {i} (time={midi_time:.3f})")
+            break
+
+        svg_notes = svg_chord_groups[i]
+
+        # Within this chord, match notes 1-to-1 by pitch/Y order
+        if len(midi_notes) != len(svg_notes):
+            total_chord_mismatches += 1
+            # Only print details for first few mismatches
+            if total_chord_mismatches <= 3:
+                print(f"  WARNING: Chord size mismatch at time={midi_time:.3f}:")
+                print(f"    MIDI notes: {len(midi_notes)}, SVG notes: {len(svg_notes)}")
+
+        for j, note_event in enumerate(midi_notes):
+            if j < len(svg_notes):
+                svg_x, svg_y = svg_notes[j]
+                note_event['svgX'] = svg_x
+                note_event['svgY'] = svg_y
+                matched += 1
+
+    if total_chord_mismatches > 3:
+        print(f"  ... and {total_chord_mismatches - 3} more chord size mismatches")
 
     print(f"  Matched {matched} noteOn events to SVG coordinates")
     return matched
@@ -667,8 +698,12 @@ def build_curve_data(data, max_curves):
 
     # === STEP 2: Trace each curve one at a time ===
     # curve1 gets lowest bY, curve2 next lowest, etc.
+    #
+    # IMPORTANT: Track which notes are "claimed" at each timestamp to ensure
+    # curves distribute across different notes rather than all piling onto one.
 
     completed_curves = {}  # curve_name -> [(time, note, svgX, svgY, bY, noteName), ...]
+    claimed_notes = {}  # time -> set of note numbers claimed by completed curves
 
     for curve_idx, curve_name in enumerate(curve_names):
         # Trace this curve from END to START
@@ -712,15 +747,36 @@ def build_curve_data(data, max_curves):
                 continue
 
             # Find the best landing position at this time
-            # We want the LOWEST bY that maintains the invariant
-            # (curve1 at bottom, so it takes lowest; curve7 takes whatever's left at top)
+            # We want the LOWEST bY that:
+            # 1. Maintains the invariant (bY >= all lower curves' bY)
+            # 2. Is NOT already claimed by a lower-numbered curve at this timestamp
+            #
+            # This ensures curves distribute: curve1 takes lowest, curve2 takes next lowest, etc.
             best_landing = None
 
+            # Get notes already claimed at this time
+            already_claimed = claimed_notes.get(current_time, set())
+
+            # DEBUG: trace t=241.8 (last 4-note chord) and t=9.6 (where violation starts)
+            debug_this = abs(current_time - 241.798) < 0.01 or abs(current_time - 9.6) < 0.01
+
             for note, svgX, svgY, bY, noteName, end_t in notes_available:
+                # Skip notes already claimed by lower-numbered curves
+                if note in already_claimed:
+                    if debug_this:
+                        print(f"DEBUG {curve_name} t={current_time:.3f}: note={noteName} bY={bY:.4f} ALREADY CLAIMED, skipping")
+                    continue
+
+                if debug_this:
+                    print(f"DEBUG {curve_name} t={current_time:.3f}: checking note={noteName} bY={bY:.4f}")
+
                 if current_note is None:
                     # First landing (at end of song), pick lowest valid bY
-                    if is_position_valid(curve_idx, bY, current_time, bY, current_time,
-                                        completed_curves):
+                    valid = is_position_valid(curve_idx, bY, current_time, bY, current_time,
+                                        completed_curves)
+                    if debug_this:
+                        print(f"  -> valid={valid}, best_so_far={best_landing[4] if best_landing else None}")
+                    if valid:
                         if best_landing is None or bY < best_landing[3]:
                             best_landing = (note, svgX, svgY, bY, noteName, end_t)
                 else:
@@ -740,12 +796,36 @@ def build_curve_data(data, max_curves):
                             best_landing = (note, svgX, svgY, bY, noteName, end_t)
 
             if best_landing is None:
-                # No valid position found - fall back to lowest available
-                print(f"WARNING: No valid position for {curve_name} at t={current_time}")
-                best_landing = notes_available[0]
+                # No unclaimed note with valid bY found.
+                # Fall back: pick the HIGHEST bY note that maintains ordering.
+                # This ensures higher-numbered curves stay at higher bY.
+
+                # Get max bY from lower-numbered curves at this time
+                min_required_bY = 0.0
+                for prev_curve_name, prev_landings in completed_curves.items():
+                    prev_bY = get_curve_bY_at_time(prev_landings, current_time)
+                    if prev_bY is not None and prev_bY > min_required_bY:
+                        min_required_bY = prev_bY
+
+                # Find the highest bY note that's >= min_required_bY
+                for note, svgX, svgY, bY, noteName, end_t in reversed(notes_available):  # reversed = highest bY first
+                    if bY >= min_required_bY - 0.001:
+                        best_landing = (note, svgX, svgY, bY, noteName, end_t)
+                        break
+
+                if best_landing is None:
+                    # Still no valid note - use the highest bY available
+                    print(f"WARNING: No valid bY for {curve_name} at t={current_time}, using highest available")
+                    best_landing = notes_available[-1]  # highest bY (notes are sorted ascending)
 
             note, svgX, svgY, bY, noteName, end_t = best_landing
             curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
+
+            # Mark this note as claimed at this timestamp
+            if current_time not in claimed_notes:
+                claimed_notes[current_time] = set()
+            claimed_notes[current_time].add(note)
+
             current_note = note
             current_bY = bY
             current_end_time = end_t
