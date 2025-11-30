@@ -2,8 +2,8 @@
 """
 Comprehensive unit tests for gen-note-jumping-curves-to-json.py
 
-Run with: python3 test_curve_generator.py
-Or: python3 -m pytest test_curve_generator.py -v
+Run with: python3 curve_generator_tests.py
+Or: python3 -m pytest curve_generator_tests.py -v
 
 These tests verify the curve generation algorithm produces correct output.
 Add new tests whenever bugs are discovered to prevent regressions.
