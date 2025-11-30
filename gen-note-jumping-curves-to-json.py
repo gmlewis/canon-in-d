@@ -735,11 +735,15 @@ def build_curve_data(data, max_curves):
     MOVE_WEIGHT = 1.0
     USAGE_WEIGHT = 12.0
     COVERED_PENALTY = 25.0
+    ACTIVE_WEIGHT = 40.0
+
+    active_note_counts = defaultdict(int)
 
     for curve_idx, curve_name in enumerate(curve_names):
         curve_landings = []
 
         current_note = None
+        current_note_key = None
         current_note_end = 0.0
         current_bY = None
         last_landing_time = 0.0
@@ -748,6 +752,14 @@ def build_curve_data(data, max_curves):
             notes_available = notes_at_time.get(current_time, [])
             if not notes_available:
                 continue
+
+            # Release the current note if it has ended
+            if (current_note is not None and
+                    current_time >= current_note_end - 0.01):
+                if current_note_key is not None and active_note_counts[current_note_key] > 0:
+                    active_note_counts[current_note_key] -= 1
+                current_note = None
+                current_note_key = None
 
             # Extend current note if it restarts at this timestamp
             if current_note is not None and current_time < current_note_end - 0.01:
@@ -774,10 +786,12 @@ def build_curve_data(data, max_curves):
                 rank_score = abs(rank - target_rank)
                 move_score = abs(bY - current_bY) if current_bY is not None else 0.0
                 usage_score = note_usage_counts[note_key]
+                active_penalty = active_note_counts[note_key] * ACTIVE_WEIGHT
                 covered_penalty = COVERED_PENALTY if note_key in notes_covered else 0.0
                 total_score = (rank_score * RANK_WEIGHT) + \
                               (move_score * MOVE_WEIGHT) + \
                               (usage_score * USAGE_WEIGHT) + \
+                              active_penalty + \
                               covered_penalty
 
                 if total_score < best_score:
@@ -790,10 +804,12 @@ def build_curve_data(data, max_curves):
             note, svgX, svgY, bY, noteName, end_t, note_key = best_candidate
             curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
             current_note = note
+            current_note_key = note_key
             current_note_end = end_t
             current_bY = bY
             last_landing_time = current_time
             note_usage_counts[note_key] += 1
+            active_note_counts[note_key] += 1
             notes_covered.add(note_key)
 
         completed_curves[curve_name] = curve_landings
