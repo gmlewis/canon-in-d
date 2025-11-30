@@ -710,19 +710,19 @@ def build_curve_data(data, max_curves):
     # === STEP 2: Process ALL timestamps, distributing notes to curves ===
     #
     # ALGORITHM: Forward-time processing that respects note durations
-    # and maintains Y-ordering.
+    # and maintains Y-ordering through atomic curve assignment.
     #
-    # For each curve, track:
-    # - Current note (if any)
-    # - When current note ends
-    # - Current bY position
+    # Key insight: We process all 7 curves TOGETHER at each timestamp,
+    # not one at a time. This ensures the Y-ordering invariant is always
+    # satisfied.
     #
     # At each timestamp:
-    # 1. Check which curves' notes have ended → they need new landings
-    # 2. Sort available notes by bY
-    # 3. Assign notes to curves maintaining Y-ordering
+    # 1. Sort available notes by bY (lowest first)
+    # 2. For curves whose notes have ended, they MUST find new notes
+    # 3. Curves still holding notes keep their positions
+    # 4. Assign notes to free curves in order (curve1 gets lowest, etc.)
     #
-    # The key constraint: at any time, curve1.bY <= curve2.bY <= ... <= curve7.bY
+    # The constraint: curve1.bY <= curve2.bY <= ... <= curve7.bY
 
     # Track state for each curve
     curve_state = {}
@@ -744,73 +744,80 @@ def build_curve_data(data, max_curves):
 
         # Sort notes by bY ascending (lowest pitch = lowest bY first)
         notes_sorted = sorted(notes_starting, key=lambda x: x[3])
-        notes_by_bY = {n[3]: n for n in notes_sorted}  # bY -> note data
 
-        # Get current bY for each curve (what they're currently at)
-        current_bYs = []
+        # First, check for note extensions (same note restarting)
         for curve_idx, curve_name in enumerate(curve_names):
             state = curve_state[curve_name]
-            if state['bY'] is not None:
-                current_bYs.append((curve_idx, state['bY'], state['end_time']))
-            else:
-                current_bYs.append((curve_idx, None, 0.0))
-
-        # Determine which curves need to land (note ended or never started)
-        curves_needing_landing = []
-        curves_holding = []  # Curves still on a valid note
-
-        for curve_idx, curve_name in enumerate(curve_names):
-            state = curve_state[curve_name]
-
-            if state['note'] is None:
-                curves_needing_landing.append(curve_idx)
-            elif current_time >= state['end_time'] - 0.01:
-                curves_needing_landing.append(curve_idx)
-            else:
-                # Check if same note restarts
+            if state['note'] is not None:
                 for note, svgX, svgY, bY, noteName, end_t in notes_sorted:
-                    if note == state['note']:
+                    if note == state['note'] and abs(bY - state['bY']) < 0.01:
+                        # Same note restarts - extend duration
                         state['end_time'] = max(state['end_time'], end_t)
                         break
+
+        # Categorize curves
+        curves_free = []  # Note ended, need new landing
+        curves_holding = []  # Still on a held note
+
+        for curve_idx, curve_name in enumerate(curve_names):
+            state = curve_state[curve_name]
+            if state['note'] is None:
+                curves_free.append(curve_idx)
+            elif current_time >= state['end_time'] - 0.01:
+                curves_free.append(curve_idx)
+            else:
                 curves_holding.append(curve_idx)
 
-        if not curves_needing_landing:
-            continue  # All curves are holding - skip this timestamp
+        if not curves_free:
+            continue  # All curves holding - nothing to do
 
-        # Build the bY constraints from holding curves
-        # curves_holding have fixed bY positions that constrain the needing curves
-        holding_bYs = {}
+        # Build the constraint intervals for free curves
+        # Each free curve must fit between its holding neighbors
+
+        # Get fixed bY positions from holding curves
+        fixed_positions = {}  # curve_idx -> bY
         for curve_idx in curves_holding:
-            holding_bYs[curve_idx] = curve_state[curve_names[curve_idx]]['bY']
+            fixed_positions[curve_idx] = curve_state[curve_names[curve_idx]]['bY']
 
-        # Assign notes to curves that need landing
-        # Process from lowest to highest curve index
-        used_notes = set()
+        # For each free curve, find the valid bY range
+        # It must be >= all lower curves and <= all higher curves
+        curve_ranges = {}  # curve_idx -> (min_bY, max_bY)
 
-        for curve_idx in sorted(curves_needing_landing):
-            curve_name = curve_names[curve_idx]
-            state = curve_state[curve_name]
-
-            # Determine min/max bY for this curve based on neighbors
+        for curve_idx in curves_free:
             min_bY = 0.0
             max_bY = float('inf')
 
-            # Look at all lower-indexed curves (both holding and already assigned this round)
+            # Lower bound: max of all lower-indexed curves' bY
             for other_idx in range(curve_idx):
-                other_bY = curve_state[curve_names[other_idx]]['bY']
-                if other_bY is not None:
-                    min_bY = max(min_bY, other_bY)
+                if other_idx in fixed_positions:
+                    min_bY = max(min_bY, fixed_positions[other_idx])
 
-            # Look at all higher-indexed holding curves
+            # Upper bound: min of all higher-indexed curves' bY
             for other_idx in range(curve_idx + 1, len(curve_names)):
-                if other_idx in holding_bYs:
-                    max_bY = min(max_bY, holding_bYs[other_idx])
+                if other_idx in fixed_positions:
+                    max_bY = min(max_bY, fixed_positions[other_idx])
 
-            # Find the lowest-bY note in range [min_bY, max_bY] that hasn't been used
+            curve_ranges[curve_idx] = (min_bY, max_bY)
+
+        # Now assign notes to free curves
+        # Strategy: process free curves in order, each takes the lowest valid note
+        used_notes = set()
+
+        for curve_idx in sorted(curves_free):
+            curve_name = curve_names[curve_idx]
+            state = curve_state[curve_name]
+            min_bY, max_bY = curve_ranges[curve_idx]
+
+            # Also consider previously assigned free curves as lower bounds
+            for other_idx in sorted(curves_free):
+                if other_idx < curve_idx:
+                    other_bY = curve_state[curve_names[other_idx]]['bY']
+                    if other_bY is not None:
+                        min_bY = max(min_bY, other_bY)
+
+            # Find the lowest-bY note in range that hasn't been used
             best_note = None
             for note, svgX, svgY, bY, noteName, end_t in notes_sorted:
-                if id(notes_sorted) in used_notes:
-                    continue
                 note_key = (note, current_time)
                 if note_key in used_notes:
                     continue
@@ -824,7 +831,10 @@ def build_curve_data(data, max_curves):
                 state['landings'].append((current_time, note, svgX, svgY, bY, noteName))
                 state['note'] = note
                 state['end_time'] = end_t
-                state['bY'] = bY    # Build completed_curves from curve_state
+                state['bY'] = bY
+            # If no valid note found, curve stays in current position (or uninitialized)
+
+    # Build completed_curves from curve_state
     completed_curves = {}
     for curve_name in curve_names:
         completed_curves[curve_name] = curve_state[curve_name]['landings']
