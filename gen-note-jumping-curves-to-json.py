@@ -561,9 +561,7 @@ def build_curve_data(data, max_curves):
                 if my_svgY > prev_svgY + 0.001:  # Small tolerance
                     return False
 
-        return True
-
-    # === STEP 1: Build the list of all landing timestamps and available notes ===
+        return True    # === STEP 1: Build the list of all landing timestamps and available notes ===
 
     # For each noteOn time, what notes are available?
     notes_at_time = {}  # time -> [(note, svgX, svgY, noteName, end_time), ...]
@@ -663,11 +661,14 @@ def build_curve_data(data, max_curves):
                     # Check if arc from this origin to current destination is valid
                     # Origin: (svgY at current_time)
                     # Destination: (current_svgY at the time we land there)
+                    # Note: curve_landings is in reverse time order (newest first),
+                    # so we need to find the SMALLEST time > current_time (the immediate next landing)
                     dest_time = None
                     for landing in curve_landings:
                         if landing[0] > current_time:
-                            dest_time = landing[0]
-                            break
+                            # This is a candidate - but we want the smallest one
+                            if dest_time is None or landing[0] < dest_time:
+                                dest_time = landing[0]
                     if dest_time is None:
                         dest_time = current_time
 
