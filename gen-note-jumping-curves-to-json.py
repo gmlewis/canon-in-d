@@ -820,66 +820,17 @@ def build_curve_data(data, max_curves):
 
         # Second pass: ensure all notes are covered
         # Any note not yet assigned needs a curve to land on it
-        unassigned_notes = []
-        for note, svgX, svgY, bY, noteName, end_t in notes_starting:
-            if (note, current_time) not in assigned_notes:
-                unassigned_notes.append((note, svgX, svgY, bY, noteName, end_t))
+        # DISABLED: This was causing Y-ordering violations
+        # TODO: Find a way to cover unassigned notes without breaking Y-ordering
+        pass
+        # unassigned_notes = []
+        # for note, svgX, svgY, bY, noteName, end_t in notes_starting:
+        #     if (note, current_time) not in assigned_notes:
+        #         unassigned_notes.append((note, svgX, svgY, bY, noteName, end_t))
 
-        if unassigned_notes:
-            # Find curves that can land on these notes
-            # A curve can land if:
-            # 1. Its current note has ended OR
-            # 2. The new note maintains Y-ordering
-
-            for note, svgX, svgY, bY, noteName, end_t in unassigned_notes:
-                # Find a suitable curve for this note
-                best_curve_idx = None
-                best_curve_cost = float('inf')
-
-                for curve_idx, curve_name in enumerate(curve_names):
-                    state = curve_state[curve_name]
-
-                    # Check Y-ordering constraint
-                    # This curve must have bY >= previous curve's bY
-                    min_bY = 0.0
-                    if curve_idx > 0:
-                        prev_state = curve_state[curve_names[curve_idx - 1]]
-                        prev_bY = get_curve_bY_at_time(prev_state['landings'], current_time)
-                        if prev_bY is not None:
-                            min_bY = prev_bY
-
-                    # This curve must have bY <= next curve's bY
-                    max_bY = float('inf')
-                    if curve_idx < len(curve_names) - 1:
-                        next_state = curve_state[curve_names[curve_idx + 1]]
-                        next_bY = get_curve_bY_at_time(next_state['landings'], current_time)
-                        if next_bY is not None:
-                            max_bY = next_bY
-
-                    # Check if this note's bY fits in the range [min_bY, max_bY]
-                    if bY >= min_bY - 0.001 and bY <= max_bY + 0.001:
-                        # Calculate cost: prefer curves that aren't holding a long note
-                        if state['note'] is None:
-                            cost = 0  # Best: curve hasn't started
-                        else:
-                            time_remaining = state['end_time'] - current_time
-                            if time_remaining <= 0:
-                                cost = 1  # Good: note has ended
-                            else:
-                                cost = 10 + time_remaining  # Worse: would interrupt
-
-                        if cost < best_curve_cost:
-                            best_curve_cost = cost
-                            best_curve_idx = curve_idx
-
-                if best_curve_idx is not None:
-                    curve_name = curve_names[best_curve_idx]
-                    state = curve_state[curve_name]
-                    state['landings'].append((current_time, note, svgX, svgY, bY, noteName))
-                    state['note'] = note
-                    state['end_time'] = end_t
-                    state['bY'] = bY
-                    assigned_notes.add((note, current_time))
+        # Second pass disabled - see above
+        # if unassigned_notes:
+        #     ... (code removed)
 
     # Build completed_curves from curve_state
     completed_curves = {}
