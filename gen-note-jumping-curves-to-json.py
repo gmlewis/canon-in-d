@@ -783,16 +783,23 @@ def build_curve_data(data, max_curves):
                     valid = is_position_valid(curve_idx, bY, current_time, bY, current_time,
                                         completed_curves)
                     if debug_this:
-                        print(f"  -> valid={valid}")
+                        print(f"  -> first landing valid={valid}")
                     if valid:
                         # Check for strictly greater option
                         if bY > max_prev_bY + 0.01:  # strictly greater with tolerance
                             if strictly_greater_best is None or bY < strictly_greater_best[3]:
                                 strictly_greater_best = (note, svgX, svgY, bY, noteName, end_t)
+                                if debug_this:
+                                    print(f"  -> strictly_greater_best = {noteName}")
                         # Also track equal-or-greater option
                         if bY >= max_prev_bY - 0.001:
                             if equal_or_greater_best is None or bY < equal_or_greater_best[3]:
                                 equal_or_greater_best = (note, svgX, svgY, bY, noteName, end_t)
+                                if debug_this:
+                                    print(f"  -> equal_or_greater_best = {noteName}")
+                    else:
+                        if debug_this:
+                            print(f"  -> REJECTED by is_position_valid")
                 else:
                     # Check if arc from this origin to current destination is valid
                     dest_time = None
