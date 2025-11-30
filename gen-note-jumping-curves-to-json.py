@@ -5,24 +5,51 @@ Outputs a JSON file that can be read by create-curves-from-json.py in Blender.
 
 This script runs OUTSIDE of Blender and does all the data processing.
 
-COORDINATE SYSTEM:
+==============================================================================
+CRITICAL INSTRUCTION FOR AI AGENTS (Copilot, Claude, GPT, etc.):
+==============================================================================
+
+>>> NEVER WORK WITH RAW SVG COORDINATES DIRECTLY! <<<
+
+The SVG coordinate system has Y increasing DOWNWARD (Y=0 at top), which is
+the OPPOSITE of musical intuition and Blender's coordinate system.
+
+This script provides coordinate transformation functions that MUST be used:
+
+    svg_to_blender(svgX, svgY) -> (blenderX, blenderY)
+    blender_to_svg(blenderX, blenderY) -> (svgX, svgY)
+
+ALL internal algorithm logic uses BLENDER COORDINATES where:
+    - X = time (increases left to right)
+    - Y = pitch (increases upward - HIGHER Y = HIGHER MUSICAL NOTE)
+
+The invariant to maintain is simple and intuitive in Blender coordinates:
+    curve1.Y <= curve2.Y <= curve3.Y <= ... <= curve7.Y
+
+This means curve1 is always at the BOTTOM (lowest pitch notes) and
+curve7 is always at the TOP (highest pitch notes).
+
+SVG coordinates are ONLY used:
+    1. When reading from the SVG file
+    2. When writing to the output JSON (for Blender to consume)
+
+NEVER compare svgY values directly. NEVER think about "higher svgY means
+lower pitch" - just use Blender coordinates and think naturally.
+
+==============================================================================
+COORDINATE SYSTEM DETAILS:
+==============================================================================
+
 This script reads the SVG file to determine the exact scale factor that
 Blender uses when importing SVG files. The formula is:
   blender_scale = (svg_width_mm / svg_viewbox_width) / 1000
 
-Blender imports SVG with Y-axis pointing up (opposite of SVG's convention),
-so we negate the Y scale. All coordinates are calculated to match exactly
-what Blender produces when importing the SVG file.
+Blender imports SVG with Y-axis pointing up (opposite of SVG's convention).
+The transformation is:
+  blender_x = svg_x * scale
+  blender_y = (viewbox_height - svg_y) * scale
 
-CRITICAL GEOMETRY NOTE - X-Y PLANE ONLY:
-===========================================
-The curve crossover prevention algorithm works STRICTLY in the X-Y plane.
-The Z axis (arc height) is IRRELEVANT to this algorithm and can be ignored.
-
-In the X-Y plane:
-- X = time (horizontal, left to right)
-- Y = pitch (vertical, higher Y = higher musical note in Blender coordinates)
-
+X-Y PLANE GEOMETRY:
 Each curve "jump" between two landing points is a STRAIGHT LINE SEGMENT
 in the X-Y plane. The midpoint of this segment is the AVERAGE of the two
 endpoints:
@@ -30,10 +57,9 @@ endpoints:
   mid_Y = (start_Y + end_Y) / 2
 
 The Z axis creates the visual "arc" effect (curves go up in Z at midpoint,
-then back down to Z=0 at landing), but this is purely cosmetic and does NOT
-affect the crossover detection/prevention logic.
+then back down to Z=0 at landing), but Z is IRRELEVANT to crossover detection.
 
-INVARIANT TO MAINTAIN:
+INVARIANT (in Blender coordinates):
   curve1.Y <= curve2.Y <= curve3.Y <= ... <= curve7.Y
   at ALL values of X (i.e., at all times)
 
@@ -71,6 +97,42 @@ SVG_SCALE = None       # Computed from SVG viewBox and width
 X_SCALE = None         # Same as SVG_SCALE (uniform scaling)
 Y_SCALE = None         # Same as SVG_SCALE (positive, for use in formula)
 VIEWBOX_HEIGHT = None  # Height of SVG viewBox (for Y flip calculation)
+
+
+# ============================================================================
+# COORDINATE TRANSFORMATION FUNCTIONS
+# ============================================================================
+# USE THESE FUNCTIONS! Do not manually work with SVG coordinates!
+# ============================================================================
+
+def svg_to_blender(svgX, svgY):
+    """
+    Transform SVG coordinates to Blender coordinates.
+
+    USE THIS FUNCTION for all coordinate transformations!
+
+    In Blender coordinates:
+    - X increases left to right (same as SVG)
+    - Y increases UPWARD (opposite of SVG) - higher Y = higher pitch
+
+    Returns: (blenderX, blenderY) tuple
+    """
+    blenderX = svgX * X_SCALE
+    blenderY = (VIEWBOX_HEIGHT - svgY) * Y_SCALE
+    return (blenderX, blenderY)
+
+
+def blender_to_svg(blenderX, blenderY):
+    """
+    Transform Blender coordinates back to SVG coordinates.
+
+    Use this when writing output that needs SVG coordinates.
+
+    Returns: (svgX, svgY) tuple
+    """
+    svgX = blenderX / X_SCALE
+    svgY = VIEWBOX_HEIGHT - (blenderY / Y_SCALE)
+    return (svgX, svgY)
 
 
 def parse_svg_dimensions(svg_file):
@@ -416,30 +478,31 @@ def build_curve_data(data, max_curves):
     """
     Build the curve data dictionary based on note events.
 
-    CONCEPT:
-    - All 7 curves bounce continuously from start to end (no waiting!)
-    - Curves are assigned to notes maintaining the INVARIANT:
-      curve1.Y <= curve2.Y <= ... <= curveN.Y at ALL times (Blender Y)
-    - Since higher svgY = lower Blender Y, this means:
-      curve1.svgY >= curve2.svgY >= ... >= curveN.svgY
-    - This prevents curves from ever crossing each other visually
+    ===========================================================================
+    ALL LOGIC USES BLENDER COORDINATES (bY) WHERE:
+        - Higher bY = Higher pitch (more intuitive!)
+        - curve1.bY <= curve2.bY <= ... <= curve7.bY (curve1 at bottom, curve7 at top)
+
+    We convert SVG coordinates to Blender coordinates IMMEDIATELY and work
+    entirely in Blender coordinates. SVG coordinates are only used at output.
+    ===========================================================================
 
     ALGORITHM - ONE CURVE AT A TIME, BACKWARDS:
 
     We trace each curve COMPLETELY before moving to the next curve.
-    This simplifies the constraint: when tracing curveN, we only need to
-    ensure it stays >= curves 1 through N-1 (which are already fixed).
+    curve1 is traced first and gets the LOWEST available bY positions.
+    curve2 is traced second and must stay >= curve1's bY at all times.
+    And so on up to curve7 which gets the HIGHEST bY positions.
 
     For each curve (1 through 7):
     1. Start from the END (fly-out point)
     2. Work backwards through all landing timestamps
-    3. At each timestamp, choose the landing position with highest svgY
-       that is ALSO >= the svgY of all lower-numbered curves at that time
-       (considering their entire arc trajectory, not just landings)
+    3. At each timestamp, choose the landing position with LOWEST bY
+       that is ALSO >= the bY of all lower-numbered curves at that time
     4. Continue to the START (fly-in point)
 
     Returns a dict: {'curve1': [...], 'curve2': [...], ...}
-    Each curve's list contains dicts: {noteName, svgX, svgY, timestamp, note, pointType}
+    Each curve's list contains dicts with both SVG and Blender coordinates.
     """
     events = collect_note_events(data)
 
@@ -486,11 +549,13 @@ def build_curve_data(data, max_curves):
     first_events_list = [(t, n, e) for t, n, e in note_on_events if t == first_time]
     first_event = min(first_events_list, key=lambda x: x[1])[2]
 
-    # === HELPER: Get svgY of a curve at any time via linear interpolation ===
-    def get_curve_svgY_at_time(curve_landings, t):
+    # === HELPER: Get Blender Y of a curve at any time via linear interpolation ===
+    def get_curve_bY_at_time(curve_landings, t):
         """
-        Get the svgY of a curve at time t, using linear interpolation between landings.
-        curve_landings is a list of (time, note, svgX, svgY, noteName) sorted by time.
+        Get the Blender Y (bY) of a curve at time t, using linear interpolation.
+        curve_landings is a list of (time, note, svgX, svgY, bY, noteName) sorted by time.
+
+        Uses BLENDER coordinates where higher bY = higher pitch.
         """
         if not curve_landings:
             return None
@@ -505,33 +570,35 @@ def build_curve_data(data, max_curves):
                 next_landing = landing
 
         if prev_landing is None:
-            return curve_landings[0][3]  # Before first landing
+            return curve_landings[0][4]  # bY is at index 4
         if next_landing is None:
-            return curve_landings[-1][3]  # After last landing
+            return curve_landings[-1][4]
         if prev_landing[0] == next_landing[0]:
-            return prev_landing[3]
+            return prev_landing[4]
 
         # Linear interpolation
         ratio = (t - prev_landing[0]) / (next_landing[0] - prev_landing[0])
-        return prev_landing[3] + ratio * (next_landing[3] - prev_landing[3])
+        return prev_landing[4] + ratio * (next_landing[4] - prev_landing[4])
 
     # === HELPER: Check if a position is valid for curveN given curves 1..N-1 ===
-    def is_position_valid(curve_num, origin_svgY, origin_time, dest_svgY, dest_time,
+    def is_position_valid(curve_num, origin_bY, origin_time, dest_bY, dest_time,
                           completed_curves):
         """
         Check if assigning curveN to go from origin to dest maintains the invariant.
 
-        The invariant: curveN.svgY <= curve(N-1).svgY <= ... <= curve1.svgY
-        (Remember: higher svgY = lower Blender Y)
+        INVARIANT (in Blender coordinates):
+            curveN.bY >= curve(N-1).bY >= ... >= curve1.bY
 
-        We need to check this at ALL times between origin_time and dest_time,
-        not just at the landing points.
+        In other words, higher-numbered curves must have HIGHER (or equal) bY
+        at all times. This is intuitive: curve7 is at the top, curve1 at bottom.
+
+        We check this at multiple times between origin and dest to catch
+        crossings that might occur during the arc.
         """
         if not completed_curves:
             return True  # curve1 has no constraints
 
         # Check at multiple time points between origin and dest
-        # The arc peak is at the midpoint, so we especially need to check there
         check_times = [origin_time]
         if origin_time != dest_time:
             mid_time = (origin_time + dest_time) / 2
@@ -543,28 +610,33 @@ def build_curve_data(data, max_curves):
             ])
 
         for t in check_times:
-            # Interpolate this curve's svgY at time t
+            # Interpolate this curve's bY at time t
             if origin_time == dest_time:
-                my_svgY = origin_svgY
+                my_bY = origin_bY
             else:
                 ratio = (t - origin_time) / (dest_time - origin_time)
-                my_svgY = origin_svgY + ratio * (dest_svgY - origin_svgY)
+                my_bY = origin_bY + ratio * (dest_bY - origin_bY)
 
-            # Check against all completed curves
+            # Check against all completed (lower-numbered) curves
             for prev_curve_name, prev_landings in completed_curves.items():
-                prev_svgY = get_curve_svgY_at_time(prev_landings, t)
-                if prev_svgY is None:
+                prev_bY = get_curve_bY_at_time(prev_landings, t)
+                if prev_bY is None:
                     continue
 
-                # curveN must have svgY <= prev_curve's svgY
-                # (lower svgY = higher Blender Y = curveN should be above prev curves)
-                if my_svgY > prev_svgY + 0.001:  # Small tolerance
+                # curveN must have bY >= prev_curve's bY (higher or equal)
+                # Using small tolerance for floating point
+                if my_bY < prev_bY - 0.001:
                     return False
 
-        return True    # === STEP 1: Build the list of all landing timestamps and available notes ===
+        return True
+
+    # === STEP 1: Build the list of all landing timestamps and available notes ===
+    # Convert to Blender coordinates IMMEDIATELY - never use raw SVG coords in logic!
 
     # For each noteOn time, what notes are available?
-    notes_at_time = {}  # time -> [(note, svgX, svgY, noteName, end_time), ...]
+    # Format: (note, svgX, svgY, bY, noteName, end_time)
+    # We keep both svgY (for output) and bY (for all logic)
+    notes_at_time = {}
     for t, note, event in note_on_events:
         if t not in notes_at_time:
             notes_at_time[t] = []
@@ -574,34 +646,37 @@ def build_curve_data(data, max_curves):
             if s == t:
                 end_t = et
                 break
+
+        svgX = event.get('svgX', 0)
+        svgY = event.get('svgY', 0)
+        # Convert to Blender Y - THIS IS THE KEY TRANSFORMATION
+        _, bY = svg_to_blender(svgX, svgY)
+
         notes_at_time[t].append((
             note,
-            event.get('svgX', 0),
-            event.get('svgY', 0),
+            svgX,
+            svgY,
+            bY,  # Blender Y for all logic
             event.get('name', ''),
             end_t
         ))
 
-    # Sort notes at each time by svgY descending (highest svgY = curve1's preferred slot)
+    # Sort notes at each time by bY ASCENDING (lowest bY first = curve1's preferred slot)
     for t in notes_at_time:
-        notes_at_time[t].sort(key=lambda x: -x[2])
+        notes_at_time[t].sort(key=lambda x: x[3])  # Sort by bY ascending
 
     # === STEP 2: Trace each curve one at a time ===
+    # curve1 gets lowest bY, curve2 next lowest, etc.
 
-    completed_curves = {}  # curve_name -> [(time, note, svgX, svgY, noteName), ...]
+    completed_curves = {}  # curve_name -> [(time, note, svgX, svgY, bY, noteName), ...]
 
     for curve_idx, curve_name in enumerate(curve_names):
         # Trace this curve from END to START
         curve_landings = []
 
-        # Start with the last note (we'll work backwards)
-        # Find the last noteOn time
-        last_time = note_on_times[-1]
-
-        # Current state: which note is this curve on, and when does it end?
-        # We work backwards, so "current" means "future" in forward time
+        # Current state: which note is this curve on, and what's its bY?
         current_note = None
-        current_svgY = None
+        current_bY = None
         current_end_time = end_time
 
         # Process timestamps from end to start
@@ -613,23 +688,18 @@ def build_curve_data(data, max_curves):
                 continue
 
             # Do we need to land at this time?
-            # Yes, if:
-            # 1. This is our first assignment (current_note is None), OR
-            # 2. Our current note started at this time (we need an origin)
-
             need_landing = False
             if current_note is None:
                 need_landing = True
             else:
                 # Check if current_note started at current_time
-                for note, svgX, svgY, noteName, end_t in notes_available:
+                for note, svgX, svgY, bY, noteName, end_t in notes_available:
                     if note == current_note:
                         need_landing = True
                         break
 
             if not need_landing:
                 # Check if our current note was still available (active) at this time
-                # If not, we need to find where we were before
                 note_was_active = False
                 for s, e in note_instances.get(current_note, []):
                     if s <= current_time < e:
@@ -642,51 +712,42 @@ def build_curve_data(data, max_curves):
                 continue
 
             # Find the best landing position at this time
-            # We want the highest svgY that maintains the invariant
+            # We want the LOWEST bY that maintains the invariant
+            # (curve1 at bottom, so it takes lowest; curve7 takes whatever's left at top)
             best_landing = None
 
-            for note, svgX, svgY, noteName, end_t in notes_available:
-                # Check if this position is valid
+            for note, svgX, svgY, bY, noteName, end_t in notes_available:
                 if current_note is None:
-                    # First landing (at end of song), just pick highest svgY
-                    # that's valid against completed curves
-                    dest_svgY = svgY
-                    dest_time = current_time
-                    # For the "destination" check, use the same position
-                    if is_position_valid(curve_idx, svgY, current_time, svgY, current_time,
+                    # First landing (at end of song), pick lowest valid bY
+                    if is_position_valid(curve_idx, bY, current_time, bY, current_time,
                                         completed_curves):
-                        if best_landing is None or svgY > best_landing[2]:
-                            best_landing = (note, svgX, svgY, noteName, end_t)
+                        if best_landing is None or bY < best_landing[3]:
+                            best_landing = (note, svgX, svgY, bY, noteName, end_t)
                 else:
                     # Check if arc from this origin to current destination is valid
-                    # Origin: (svgY at current_time)
-                    # Destination: (current_svgY at the time we land there)
-                    # Note: curve_landings is in reverse time order (newest first),
-                    # so we need to find the SMALLEST time > current_time (the immediate next landing)
+                    # Find the immediate next landing time
                     dest_time = None
                     for landing in curve_landings:
                         if landing[0] > current_time:
-                            # This is a candidate - but we want the smallest one
                             if dest_time is None or landing[0] < dest_time:
                                 dest_time = landing[0]
                     if dest_time is None:
                         dest_time = current_time
 
-                    if is_position_valid(curve_idx, svgY, current_time, current_svgY, dest_time,
+                    if is_position_valid(curve_idx, bY, current_time, current_bY, dest_time,
                                         completed_curves):
-                        if best_landing is None or svgY > best_landing[2]:
-                            best_landing = (note, svgX, svgY, noteName, end_t)
+                        if best_landing is None or bY < best_landing[3]:
+                            best_landing = (note, svgX, svgY, bY, noteName, end_t)
 
             if best_landing is None:
-                # No valid position found - fall back to highest available
-                # This shouldn't happen if the algorithm is correct
+                # No valid position found - fall back to lowest available
                 print(f"WARNING: No valid position for {curve_name} at t={current_time}")
                 best_landing = notes_available[0]
 
-            note, svgX, svgY, noteName, end_t = best_landing
-            curve_landings.append((current_time, note, svgX, svgY, noteName))
+            note, svgX, svgY, bY, noteName, end_t = best_landing
+            curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
             current_note = note
-            current_svgY = svgY
+            current_bY = bY
             current_end_time = end_t
 
         # Reverse to get chronological order
@@ -694,31 +755,38 @@ def build_curve_data(data, max_curves):
         completed_curves[curve_name] = curve_landings
 
     # === STEP 3: Build final curve data ===
+    # Convert back to the output format (keeping both SVG and Blender coords for flexibility)
 
     curves = {}
     for cn in curve_names:
         points = []
         landings = completed_curves.get(cn, [])
 
-        # Add start point (fly-in)
+        # Add start point (fly-in) - use first event's position
+        first_svgX = first_event.get('svgX', 0)
+        first_svgY = first_event.get('svgY', 0)
+        _, first_bY = svg_to_blender(first_svgX, first_svgY)
+
         start_point = {
             'noteName': first_event.get('name', ''),
             'note': first_event.get('note', 0),
-            'svgX': first_event.get('svgX', 0),
-            'svgY': first_event.get('svgY', 0),
+            'svgX': first_svgX,
+            'svgY': first_svgY,
+            'bY': first_bY,
             'timestamp': 0.0,
             'pointType': 'start'
         }
         points.append(start_point)
 
         # Add landing points
-        for t, note, svgX, svgY, noteName in landings:
+        for t, note, svgX, svgY, bY, noteName in landings:
             if t > 0:
                 point = {
                     'noteName': noteName,
                     'note': note,
                     'svgX': svgX,
                     'svgY': svgY,
+                    'bY': bY,
                     'timestamp': t,
                     'pointType': 'landing'
                 }
@@ -732,6 +800,7 @@ def build_curve_data(data, max_curves):
                 'note': last_point['note'],
                 'svgX': last_point['svgX'] + END_X_OFFSET,
                 'svgY': last_point['svgY'],
+                'bY': last_point['bY'],
                 'timestamp': end_time,
                 'pointType': 'end'
             }

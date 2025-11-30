@@ -20,7 +20,7 @@ JSON_FILE = "note-jumping-curves.json"
 
 class TestCurveGenerator(unittest.TestCase):
     """Tests for the curve generator output."""
-    
+
     @classmethod
     def setUpClass(cls):
         """Load the JSON file once for all tests."""
@@ -28,28 +28,28 @@ class TestCurveGenerator(unittest.TestCase):
             raise FileNotFoundError(
                 f"Cannot find {JSON_FILE}. Run gen-note-jumping-curves-to-json.py first."
             )
-        
+
         with open(JSON_FILE, 'r') as f:
             cls.data = json.load(f)
-        
+
         cls.curves = cls.data.get('curves', {})
         cls.curve_names = ['curve1', 'curve2', 'curve3', 'curve4', 'curve5', 'curve6', 'curve7']
         cls.config = cls.data.get('config', {})
-    
+
     def get_landings(self, curve_name):
         """Extract landing points from a curve."""
         points = self.curves.get(curve_name, {}).get('points', [])
-        return [(p['timestamp'], p['svgY'], p.get('noteName', '')) 
+        return [(p['timestamp'], p['svgY'], p.get('noteName', ''))
                 for p in points if p.get('type') == 'landing']
-    
+
     def get_svgY_at_time(self, points, t):
         """Get svgY at time t via linear interpolation between landings."""
-        landings = [(p['timestamp'], p['svgY']) for p in points 
+        landings = [(p['timestamp'], p['svgY']) for p in points
                     if p.get('type') in ['landing', 'fly_in']]
         if not landings:
             return None
         landings.sort()
-        
+
         prev = None
         next_l = None
         for lt, ly in landings:
@@ -57,47 +57,47 @@ class TestCurveGenerator(unittest.TestCase):
                 prev = (lt, ly)
             if lt >= t and next_l is None:
                 next_l = (lt, ly)
-        
+
         if prev is None:
             return landings[0][1]
         if next_l is None:
             return landings[-1][1]
         if prev[0] == next_l[0]:
             return prev[1]
-        
+
         ratio = (t - prev[0]) / (next_l[0] - prev[0])
         return prev[1] + ratio * (next_l[1] - prev[1])
 
     # =========================================================================
     # TEST: Basic structure
     # =========================================================================
-    
+
     def test_json_has_all_curves(self):
         """Verify all 7 curves exist in the JSON."""
         for cn in self.curve_names:
             self.assertIn(cn, self.curves, f"Missing curve: {cn}")
-    
+
     def test_each_curve_has_points(self):
         """Verify each curve has points."""
         for cn in self.curve_names:
             points = self.curves[cn].get('points', [])
             self.assertGreater(len(points), 0, f"{cn} has no points")
-    
+
     def test_each_curve_has_landings(self):
         """Verify each curve has landing points."""
         for cn in self.curve_names:
             landings = self.get_landings(cn)
-            self.assertGreater(len(landings), 10, 
+            self.assertGreater(len(landings), 10,
                 f"{cn} has too few landings: {len(landings)}")
 
     # =========================================================================
     # TEST: Curves must be DIFFERENT from each other
     # =========================================================================
-    
+
     def test_curves_are_not_identical(self):
         """
         CRITICAL: Verify curves are NOT identical to each other.
-        
+
         If all curves have the same landings, the algorithm is broken.
         Each curve should visit different notes at various times.
         """
@@ -107,16 +107,16 @@ class TestCurveGenerator(unittest.TestCase):
             landings = self.get_landings(cn)
             # Create a hashable representation: tuple of (time, svgY)
             all_landings[cn] = tuple((round(t, 3), round(y, 3)) for t, y, _ in landings)
-        
+
         # Check that not all curves are identical
         unique_patterns = set(all_landings.values())
         self.assertGreater(len(unique_patterns), 1,
             "FAILURE: All curves have identical landing patterns! "
             "The algorithm is not differentiating between curves.")
-    
+
     def test_curves_differ_at_concurrent_notes(self):
         """
-        Verify that when multiple notes play simultaneously, 
+        Verify that when multiple notes play simultaneously,
         different curves land on different notes.
         """
         # Build a map of time -> which curves land there and on what note
@@ -124,15 +124,15 @@ class TestCurveGenerator(unittest.TestCase):
         for cn in self.curve_names:
             for t, svgY, noteName in self.get_landings(cn):
                 time_to_landings[round(t, 3)].append((cn, svgY, noteName))
-        
+
         # Find times where multiple curves land
-        times_with_multiple = {t: lands for t, lands in time_to_landings.items() 
+        times_with_multiple = {t: lands for t, lands in time_to_landings.items()
                                if len(lands) > 1}
-        
+
         # At least some of these times should have curves on DIFFERENT notes
         different_notes_count = 0
         same_notes_count = 0
-        
+
         for t, lands in times_with_multiple.items():
             svgYs = [l[1] for l in lands]
             unique_svgYs = set(round(y, 1) for y in svgYs)
@@ -140,13 +140,13 @@ class TestCurveGenerator(unittest.TestCase):
                 different_notes_count += 1
             else:
                 same_notes_count += 1
-        
+
         # We expect SOME times to have curves on different notes
         # (This is the whole point - curves should spread across concurrent notes)
         self.assertGreater(different_notes_count, 0,
             f"No times found where curves land on different notes! "
             f"Same notes: {same_notes_count}, Different: {different_notes_count}")
-    
+
     def test_curve_landing_sequences_differ(self):
         """
         Compare landing sequences between consecutive curves.
@@ -155,17 +155,17 @@ class TestCurveGenerator(unittest.TestCase):
         for i in range(len(self.curve_names) - 1):
             cn1 = self.curve_names[i]
             cn2 = self.curve_names[i + 1]
-            
+
             landings1 = self.get_landings(cn1)
             landings2 = self.get_landings(cn2)
-            
+
             # Compare note names at each landing
             differences = 0
             min_len = min(len(landings1), len(landings2))
             for j in range(min_len):
                 if landings1[j][2] != landings2[j][2]:  # Compare note names
                     differences += 1
-            
+
             self.assertGreater(differences, 0,
                 f"{cn1} and {cn2} have identical landing sequences! "
                 f"Checked {min_len} landings, found {differences} differences.")
@@ -173,10 +173,10 @@ class TestCurveGenerator(unittest.TestCase):
     # =========================================================================
     # TEST: Y-ordering invariant (no crossovers)
     # =========================================================================
-    
+
     def test_invariant_at_landing_times(self):
         """
-        Verify curve1.svgY >= curve2.svgY >= ... >= curve7.svgY 
+        Verify curve1.svgY >= curve2.svgY >= ... >= curve7.svgY
         at all landing timestamps.
         """
         # Collect all landing times
@@ -184,7 +184,7 @@ class TestCurveGenerator(unittest.TestCase):
         for cn in self.curve_names:
             for t, _, _ in self.get_landings(cn):
                 all_times.add(round(t, 4))
-        
+
         violations = []
         for t in sorted(all_times):
             svgYs = []
@@ -193,7 +193,7 @@ class TestCurveGenerator(unittest.TestCase):
                 y = self.get_svgY_at_time(points, t)
                 if y is not None:
                     svgYs.append((cn, y))
-            
+
             # Check ordering
             for i in range(len(svgYs) - 1):
                 if svgYs[i][1] < svgYs[i+1][1] - 0.01:
@@ -204,11 +204,11 @@ class TestCurveGenerator(unittest.TestCase):
                         'curve_below': svgYs[i+1][0],
                         'svgY_below': svgYs[i+1][1]
                     })
-        
+
         self.assertEqual(len(violations), 0,
             f"Found {len(violations)} Y-ordering violations. "
             f"First 5: {violations[:5]}")
-    
+
     def test_invariant_at_arc_midpoints(self):
         """
         Verify the Y-ordering invariant at arc midpoints (peak times).
@@ -219,7 +219,7 @@ class TestCurveGenerator(unittest.TestCase):
             points = self.curves[cn].get('points', [])
             for p in points:
                 all_times.add(p['timestamp'])
-        
+
         violations = []
         for t in sorted(all_times):
             svgYs = []
@@ -228,7 +228,7 @@ class TestCurveGenerator(unittest.TestCase):
                 y = self.get_svgY_at_time(points, t)
                 if y is not None:
                     svgYs.append((cn, y))
-            
+
             for i in range(len(svgYs) - 1):
                 if svgYs[i][1] < svgYs[i+1][1] - 0.01:
                     violations.append({
@@ -238,7 +238,7 @@ class TestCurveGenerator(unittest.TestCase):
                         'curve_below': svgYs[i+1][0],
                         'svgY_below': svgYs[i+1][1]
                     })
-        
+
         self.assertEqual(len(violations), 0,
             f"Found {len(violations)} Y-ordering violations at arc midpoints. "
             f"First 5: {violations[:5]}")
@@ -246,31 +246,31 @@ class TestCurveGenerator(unittest.TestCase):
     # =========================================================================
     # TEST: Note distribution
     # =========================================================================
-    
+
     def test_notes_are_distributed_across_curves(self):
         """
-        When multiple notes play at once, different curves should 
+        When multiple notes play at once, different curves should
         land on different notes (not all on the same one).
         """
         # Build time -> available notes mapping
         # Then check that curves actually use different notes
-        
+
         # Get all unique (time, svgY) pairs across all curves
         all_assignments = defaultdict(set)  # time -> set of (curve, svgY)
         for cn in self.curve_names:
             for t, svgY, _ in self.get_landings(cn):
                 all_assignments[round(t, 3)].add((cn, round(svgY, 1)))
-        
+
         # Count times where all curves are on the same note vs different notes
-        multi_curve_times = {t: assigns for t, assigns in all_assignments.items() 
+        multi_curve_times = {t: assigns for t, assigns in all_assignments.items()
                              if len(assigns) > 1}
-        
+
         distributed_count = 0
         for t, assigns in multi_curve_times.items():
             svgYs = set(a[1] for a in assigns)
             if len(svgYs) > 1:
                 distributed_count += 1
-        
+
         # At minimum, 10% of multi-curve times should have distribution
         min_expected = len(multi_curve_times) * 0.1
         self.assertGreater(distributed_count, min_expected,
@@ -280,22 +280,22 @@ class TestCurveGenerator(unittest.TestCase):
     # =========================================================================
     # TEST: Structural integrity
     # =========================================================================
-    
+
     def test_timestamps_are_monotonic(self):
         """Verify timestamps are in increasing order within each curve."""
         for cn in self.curve_names:
             points = self.curves[cn].get('points', [])
             timestamps = [p['timestamp'] for p in points]
-            
+
             for i in range(len(timestamps) - 1):
                 self.assertLessEqual(timestamps[i], timestamps[i+1],
                     f"{cn}: timestamps not monotonic at index {i}: "
                     f"{timestamps[i]} > {timestamps[i+1]}")
-    
+
     def test_landings_have_required_fields(self):
         """Verify landing points have all required fields."""
         required_fields = ['timestamp', 'svgX', 'svgY', 'type', 'noteName']
-        
+
         for cn in self.curve_names:
             points = self.curves[cn].get('points', [])
             for i, p in enumerate(points):
@@ -303,17 +303,17 @@ class TestCurveGenerator(unittest.TestCase):
                     for field in required_fields:
                         self.assertIn(field, p,
                             f"{cn} point {i} missing field: {field}")
-    
+
     def test_fly_in_and_fly_off_exist(self):
         """Verify each curve has fly_in and fly_off points."""
         for cn in self.curve_names:
             points = self.curves[cn].get('points', [])
             types = [p.get('type') for p in points]
-            
+
             self.assertIn('fly_in', types, f"{cn} missing fly_in point")
             # fly_off might be called 'fly_out' or similar
-            has_fly_off = any('fly' in str(t) and 'out' in str(t).lower() or 
-                              'fly' in str(t) and 'off' in str(t).lower() 
+            has_fly_off = any('fly' in str(t) and 'out' in str(t).lower() or
+                              'fly' in str(t) and 'off' in str(t).lower()
                               for t in types if t)
             # If no fly_off, at least should have an end point
             if not has_fly_off:
@@ -322,11 +322,11 @@ class TestCurveGenerator(unittest.TestCase):
     # =========================================================================
     # TEST: Sanity checks
     # =========================================================================
-    
+
     def test_svgY_values_are_reasonable(self):
         """Verify svgY values are within expected range."""
         viewbox_height = self.config.get('viewboxHeight', 1800)
-        
+
         for cn in self.curve_names:
             points = self.curves[cn].get('points', [])
             for p in points:
@@ -335,24 +335,24 @@ class TestCurveGenerator(unittest.TestCase):
                     f"{cn}: svgY {svgY} is negative")
                 self.assertLessEqual(svgY, viewbox_height * 1.5,
                     f"{cn}: svgY {svgY} exceeds viewbox height {viewbox_height}")
-    
+
     def test_svgX_increases_over_time(self):
         """Verify svgX generally increases with timestamp (left to right)."""
         for cn in self.curve_names:
-            landings = [(p['timestamp'], p['svgX']) 
-                        for p in self.curves[cn].get('points', []) 
+            landings = [(p['timestamp'], p['svgX'])
+                        for p in self.curves[cn].get('points', [])
                         if p.get('type') == 'landing']
             landings.sort()
-            
+
             if len(landings) < 2:
                 continue
-            
+
             # Most landings should have increasing X
             increasing = 0
             for i in range(len(landings) - 1):
                 if landings[i+1][1] >= landings[i][1] - 1:  # Small tolerance
                     increasing += 1
-            
+
             ratio = increasing / (len(landings) - 1)
             self.assertGreater(ratio, 0.95,
                 f"{cn}: svgX is not generally increasing with time. "
@@ -361,71 +361,71 @@ class TestCurveGenerator(unittest.TestCase):
 
 class TestCurveGeneratorDiagnostics(unittest.TestCase):
     """Diagnostic tests that print helpful information."""
-    
+
     @classmethod
     def setUpClass(cls):
         if not os.path.exists(JSON_FILE):
             raise FileNotFoundError(f"Cannot find {JSON_FILE}")
-        
+
         with open(JSON_FILE, 'r') as f:
             cls.data = json.load(f)
-        
+
         cls.curves = cls.data.get('curves', {})
         cls.curve_names = ['curve1', 'curve2', 'curve3', 'curve4', 'curve5', 'curve6', 'curve7']
-    
+
     def test_print_curve_summary(self):
         """Print a summary of each curve for visual inspection."""
         print("\n" + "="*60)
         print("CURVE SUMMARY")
         print("="*60)
-        
+
         for cn in self.curve_names:
             points = self.curves.get(cn, {}).get('points', [])
             landings = [p for p in points if p.get('type') == 'landing']
-            
+
             # Get unique notes
             notes = set(p.get('noteName', '') for p in landings)
-            
+
             print(f"\n{cn}:")
             print(f"  Total points: {len(points)}")
             print(f"  Landings: {len(landings)}")
             print(f"  Unique notes: {len(notes)}")
-            
+
             if landings:
                 first = landings[0]
                 last = landings[-1]
                 print(f"  First landing: t={first['timestamp']:.2f}, note={first.get('noteName', 'N/A')}")
                 print(f"  Last landing: t={last['timestamp']:.2f}, note={last.get('noteName', 'N/A')}")
-        
+
         print("\n" + "="*60)
-    
+
     def test_print_sample_differences(self):
         """Print examples of where curves differ."""
         print("\n" + "="*60)
         print("SAMPLE DIFFERENCES BETWEEN CURVES")
         print("="*60)
-        
+
         # Get landings for curve1 and curve2
         def get_landings(cn):
             points = self.curves.get(cn, {}).get('points', [])
-            return [(p['timestamp'], p['svgY'], p.get('noteName', '')) 
+            return [(p['timestamp'], p['svgY'], p.get('noteName', ''))
                     for p in points if p.get('type') == 'landing']
-        
+
         landings1 = get_landings('curve1')
         landings2 = get_landings('curve2')
-        
+
         print(f"\nComparing curve1 ({len(landings1)} landings) vs curve2 ({len(landings2)} landings):")
-        
+
         differences_found = 0
         for i in range(min(len(landings1), len(landings2))):
             t1, y1, n1 = landings1[i]
             t2, y2, n2 = landings2[i]
-            
+
             if abs(y1 - y2) > 0.1 or n1 != n2:
                 differences_found += 1
                 if differences_found <= 10:
                     print(f"  t={t1:.2f}: curve1={n1} (Y={y1:.1f}), curve2={n2} (Y={y2:.1f})")
-        
+
         print(f"\nTotal differences: {differences_found} / {min(len(landings1), len(landings2))}")
         print("="*60)
 
@@ -435,15 +435,15 @@ def run_tests():
     # Create a test suite
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    
+
     # Add test classes
     suite.addTests(loader.loadTestsFromTestCase(TestCurveGenerator))
     suite.addTests(loader.loadTestsFromTestCase(TestCurveGeneratorDiagnostics))
-    
+
     # Run with verbosity
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-    
+
     return result.wasSuccessful()
 
 
