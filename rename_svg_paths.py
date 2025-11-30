@@ -41,6 +41,7 @@ from xml.etree import ElementTree as ET
 INPUT_SVG_FILE = "Canon_in_D-single-svg-printing_NoteHeads.svg"
 INPUT_JSON_FILE = "CanonInD.json"
 OUTPUT_SVG_FILE = "Canon_in_D-single-svg-printing_NoteHeads_renamed.svg"
+MIDI_CHORD_TIME_TOLERANCE = 0.03
 
 # Note head half-width for center calculation (same as in gen-note-jumping-curves-to-json.py)
 NOTE_HEAD_HALF_WIDTH = 17.35
@@ -78,21 +79,32 @@ def collect_note_on_events(data):
             continue
         for event in track:
             if isinstance(event, dict) and event.get('type') == 'noteOn':
-                note_on_events.append(event)
+                note_on_events.append({
+                    'name': event.get('name', 'Unknown'),
+                    'note': event.get('note', 0),
+                    'time': event.get('time', 0.0)
+                })
 
+    if not note_on_events:
+        return []
 
-    time_groups = defaultdict(list)
-    for event in note_on_events:
-        time_groups[event.get('time', 0.0)].append({
-            'name': event.get('name', 'Unknown'),
-            'note': event.get('note', 0),
-            'time': event.get('time', 0.0)
-        })
+    note_on_events.sort(key=lambda e: e['time'])
 
     midi_chords = []
-    for time in sorted(time_groups.keys()):
-        notes = sorted(time_groups[time], key=lambda n: -n['note'])
-        midi_chords.append({'time': time, 'notes': notes})
+    current_group = [note_on_events[0]]
+    group_time = note_on_events[0]['time']
+
+    for event in note_on_events[1:]:
+        if event['time'] - current_group[-1]['time'] <= MIDI_CHORD_TIME_TOLERANCE:
+            current_group.append(event)
+        else:
+            notes_sorted = sorted(current_group, key=lambda n: -n['note'])
+            midi_chords.append({'time': group_time, 'notes': notes_sorted})
+            current_group = [event]
+            group_time = event['time']
+
+    notes_sorted = sorted(current_group, key=lambda n: -n['note'])
+    midi_chords.append({'time': group_time, 'notes': notes_sorted})
 
     return midi_chords
 
@@ -108,7 +120,6 @@ def group_by_x_tolerance(items, get_x, tolerance=15.0):
     if not items:
         return []
 
-    # Sort by X first
     sorted_items = sorted(items, key=get_x)
 
     groups = []
@@ -117,7 +128,6 @@ def group_by_x_tolerance(items, get_x, tolerance=15.0):
 
     for item in sorted_items[1:]:
         item_x = get_x(item)
-        # Check if this item is within tolerance of the group's starting X
         if item_x - current_group_start_x <= tolerance:
             current_group.append(item)
         else:
@@ -126,6 +136,7 @@ def group_by_x_tolerance(items, get_x, tolerance=15.0):
             current_group_start_x = item_x
 
     groups.append(current_group)
+
     return groups
 
 
