@@ -216,21 +216,14 @@ def optimize_path_grouping(curves_data):
       other curves to get there. They should have come from C#5 instead.
 
     SOLUTION:
-    Work backwards from detected crossings to find where curves should have diverged
-    earlier to maintain non-crossing paths. When a crossing is detected, trace back
-    to find a point where the curves could have been swapped to avoid the crossing.
+    The key insight is that curves with different landing frequencies can cross
+    between landings. For example, curve2 lands at t=18 and t=19.2, while curves
+    3 & 4 have many landings in between. We need to track the "effective position"
+    of each curve at every timestamp - either its actual landing position or its
+    interpolated position between landings.
 
-    ALGORITHM:
-    1. Build a timeline of all landing events across all curves
-    2. At each pair of consecutive timestamps, check if any curves cross
-       (their Y order swaps between the two timestamps)
-    3. When a crossing is detected, work backwards to find a "divergence point" where
-       the crossing curves were at the same or similar Y position (on same note)
-    4. Swap the curve assignments from that divergence point forward to the crossing point
-
-    The key insight is: if curve A is lower than curve B at time T1, but higher at T2,
-    they must have crossed. We trace back to find when they were together and swap
-    their assignments from that point.
+    We detect crossings by checking if a curve's destination is on the "wrong side"
+    of another curve's path, then swap their destinations.
 
     Args:
         curves_data: Dict of curve data from JSON (will be modified in place)
@@ -245,8 +238,6 @@ def optimize_path_grouping(curves_data):
         return 0
 
     # Build index: for each curve, map timestamp (rounded) -> point_index for landings
-    # Using timestamp instead of X position because curves at the same timestamp
-    # can land at slightly different X positions (due to different note head positions)
     def build_landing_index(curves_data, curve_names):
         curve_landing_indices = {}
         for curve_name in curve_names:
@@ -254,7 +245,6 @@ def optimize_path_grouping(curves_data):
             landing_indices = {}
             for i, point in enumerate(points):
                 if point.get('type') == 'landing':
-                    # Use timestamp as key, rounded to 6 decimal places
                     t_key = round(point.get('timestamp', 0), 6)
                     landing_indices[t_key] = i
             curve_landing_indices[curve_name] = landing_indices
@@ -271,53 +261,76 @@ def optimize_path_grouping(curves_data):
     if len(sorted_timestamps) < 2:
         return 0
 
-    swap_count = 0
+    # For each curve, build a list of (timestamp, y_value) for all its landings
+    def get_curve_landings(curves_data, curve_name):
+        points = curves_data[curve_name]['points']
+        landings = []
+        for pt in points:
+            if pt.get('type') == 'landing':
+                landings.append((pt.get('timestamp', 0), pt['y']))
+        return sorted(landings, key=lambda x: x[0])
 
-    # Do multiple passes since fixing one crossing might reveal or fix others
+    def interpolate_y_at_timestamp(curve_landings, t):
+        """Get the Y value of a curve at a given timestamp (interpolated if between landings)."""
+        if not curve_landings:
+            return None
+
+        # Before first landing
+        if t <= curve_landings[0][0]:
+            return curve_landings[0][1]
+
+        # After last landing
+        if t >= curve_landings[-1][0]:
+            return curve_landings[-1][1]
+
+        # Find surrounding landings and interpolate
+        for i in range(len(curve_landings) - 1):
+            t1, y1 = curve_landings[i]
+            t2, y2 = curve_landings[i + 1]
+            if t1 <= t <= t2:
+                # Linear interpolation
+                if t2 == t1:
+                    return y1
+                ratio = (t - t1) / (t2 - t1)
+                return y1 + ratio * (y2 - y1)
+
+        return curve_landings[-1][1]
+
+    swap_count = 0
     max_passes = 20
+
     for pass_num in range(max_passes):
         crossings_fixed_this_pass = 0
-
-        # Rebuild the landing index after any swaps from previous pass
         curve_landing_indices = build_landing_index(curves_data, curve_names)
 
-        # Check each pair of consecutive timestamps for crossings
+        # Get current landings for all curves
+        all_curve_landings = {cn: get_curve_landings(curves_data, cn) for cn in curve_names}
+
+        # Check each timestamp where at least one curve has a landing
         for t_idx in range(len(sorted_timestamps) - 1):
             t_current = sorted_timestamps[t_idx]
             t_next = sorted_timestamps[t_idx + 1]
 
-            # Get all curves that have landings at BOTH timestamps
-            curves_at_both = []
+            # Get all curves and their Y positions at t_current and t_next
+            # Use actual landing Y if available, otherwise interpolate
+            y_at_current = {}
+            y_at_next = {}
+
             for curve_name in curve_names:
-                if t_current in curve_landing_indices[curve_name] and \
-                   t_next in curve_landing_indices[curve_name]:
-                    curves_at_both.append(curve_name)
+                y_at_current[curve_name] = interpolate_y_at_timestamp(all_curve_landings[curve_name], t_current)
+                y_at_next[curve_name] = interpolate_y_at_timestamp(all_curve_landings[curve_name], t_next)
 
-            if len(curves_at_both) < 2:
-                continue
+            # Check for crossings between all pairs of curves
+            for i, curve_a in enumerate(curve_names):
+                for curve_b in curve_names[i+1:]:
+                    if y_at_current[curve_a] is None or y_at_current[curve_b] is None:
+                        continue
+                    if y_at_next[curve_a] is None or y_at_next[curve_b] is None:
+                        continue
 
-            # Get Y values at current and next timestamp for these curves
-            y_current = {}
-            y_next = {}
-            note_current = {}
-            note_next = {}
-            for curve_name in curves_at_both:
-                idx_current = curve_landing_indices[curve_name][t_current]
-                idx_next = curve_landing_indices[curve_name][t_next]
-                y_current[curve_name] = curves_data[curve_name]['points'][idx_current]['y']
-                y_next[curve_name] = curves_data[curve_name]['points'][idx_next]['y']
-                note_current[curve_name] = curves_data[curve_name]['points'][idx_current].get('note', 0)
-                note_next[curve_name] = curves_data[curve_name]['points'][idx_next].get('note', 0)
+                    y_diff_current = y_at_current[curve_a] - y_at_current[curve_b]
+                    y_diff_next = y_at_next[curve_a] - y_at_next[curve_b]
 
-            # Check for crossings: curves whose relative Y order changes
-            for i, curve_a in enumerate(curves_at_both):
-                for curve_b in curves_at_both[i+1:]:
-                    # Compare relative positions (with small tolerance)
-                    y_diff_current = y_current[curve_a] - y_current[curve_b]
-                    y_diff_next = y_next[curve_a] - y_next[curve_b]
-
-                    # A crossing occurs if the sign of the Y difference changes
-                    # (i.e., curve A was above B but is now below, or vice versa)
                     TOLERANCE = 0.001
                     if abs(y_diff_current) > TOLERANCE and abs(y_diff_next) > TOLERANCE:
                         a_above_b_current = y_diff_current > 0
@@ -325,29 +338,31 @@ def optimize_path_grouping(curves_data):
 
                         if a_above_b_current != a_above_b_next:
                             # Crossing detected!
-                            # Find the divergence point by working backwards
-                            divergence_t = find_divergence_point(
-                                curves_data, curve_a, curve_b,
-                                t_current, sorted_timestamps[:t_idx+1],
-                                curve_landing_indices
-                            )
+                            # We need to swap the LANDING destinations of whichever curves
+                            # actually have landings at t_next
 
-                            if divergence_t is not None:
-                                # Swap the curve paths from AFTER divergence_t to t_next
-                                # We don't swap AT divergence_t because that's where they're together
-                                swap_start_idx = sorted_timestamps.index(divergence_t) + 1
-                                if swap_start_idx <= t_idx + 1:
-                                    swap_start_t = sorted_timestamps[swap_start_idx]
-                                    swapped = swap_curve_paths(
-                                        curves_data, curve_a, curve_b,
-                                        swap_start_t, t_next,
-                                        sorted_timestamps, curve_landing_indices
-                                    )
-                                    if swapped:
-                                        swap_count += 1
-                                        crossings_fixed_this_pass += 1
-                                        # Rebuild indices after swap
-                                        curve_landing_indices = build_landing_index(curves_data, curve_names)
+                            a_has_landing = t_next in curve_landing_indices.get(curve_a, {})
+                            b_has_landing = t_next in curve_landing_indices.get(curve_b, {})
+
+                            if a_has_landing and b_has_landing:
+                                # Both have landings at t_next - swap them
+                                idx_a = curve_landing_indices[curve_a][t_next]
+                                idx_b = curve_landing_indices[curve_b][t_next]
+                                points_a = curves_data[curve_a]['points']
+                                points_b = curves_data[curve_b]['points']
+
+                                for key in ['x', 'y', 'svgX', 'svgY', 'note', 'noteName']:
+                                    if key in points_a[idx_a] and key in points_b[idx_b]:
+                                        points_a[idx_a][key], points_b[idx_b][key] = \
+                                            points_b[idx_b][key], points_a[idx_a][key]
+
+                                swap_count += 1
+                                crossings_fixed_this_pass += 1
+
+                                # Update landing data for subsequent checks
+                                all_curve_landings[curve_a] = get_curve_landings(curves_data, curve_a)
+                                all_curve_landings[curve_b] = get_curve_landings(curves_data, curve_b)
+                                curve_landing_indices = build_landing_index(curves_data, curve_names)
 
         if crossings_fixed_this_pass == 0:
             break  # No more crossings to fix
