@@ -70,6 +70,7 @@ import json
 import sys
 import os
 import re
+from collections import defaultdict
 from xml.etree import ElementTree as ET
 
 # ============================================================================
@@ -668,6 +669,8 @@ def build_curve_data(data, max_curves):
     # Format: (note, svgX, svgY, bY, noteName, end_time)
     # We keep both svgY (for output) and bY (for all logic)
     notes_at_time = {}
+    all_note_keys = set()
+    note_usage_counts = defaultdict(int)
     skipped_no_svg = 0
     for t, note, event in note_on_events:
         svgX = event.get('svgX', 0)
@@ -700,6 +703,9 @@ def build_curve_data(data, max_curves):
             end_t
         ))
 
+        note_key = (round(t, 5), note)
+        all_note_keys.add(note_key)
+
     if skipped_no_svg > 0:
         print(f"  Skipped {skipped_no_svg} notes without SVG coordinates")
 
@@ -707,29 +713,32 @@ def build_curve_data(data, max_curves):
     for t in notes_at_time:
         notes_at_time[t].sort(key=lambda x: x[3])  # Sort by bY ascending
 
-    # === STEP 2: Trace curves forward in time (top-down) ===
-    # Process curves from top (curve7) down to bottom so each lower curve
-    # knows the upper bound imposed by the curve above it.
+    # === STEP 2: Trace curves forward in time (bottom-up) ===
+    # Each curve walks the timeline independently while staying above
+    # all previously completed (lower-numbered) curves.
 
     completed_curves = {}
-    claimed_landings = set()  # (time, note) pairs already used
-
+    notes_covered = set()
     times_to_process = sorted(note_on_times)
 
-    for curve_idx in reversed(range(len(curve_names))):
-        curve_name = curve_names[curve_idx]
+    RANK_WEIGHT = 5.0
+    MOVE_WEIGHT = 1.0
+    USAGE_WEIGHT = 8.0
+
+    for curve_idx, curve_name in enumerate(curve_names):
         curve_landings = []
 
         current_note = None
         current_note_end = 0.0
         current_bY = None
+        last_landing_time = 0.0
 
         for current_time in times_to_process:
             notes_available = notes_at_time.get(current_time, [])
             if not notes_available:
                 continue
 
-            # Extend current note if it restarts
+            # Extend current note if it restarts at this timestamp
             if current_note is not None and current_time < current_note_end - 0.01:
                 for note, svgX, svgY, bY, noteName, end_t in notes_available:
                     if note == current_note and abs(bY - current_bY) < 0.01:
@@ -737,36 +746,50 @@ def build_curve_data(data, max_curves):
                         break
                 continue
 
-            # Determine max bY allowed to avoid crossing higher curve
-            max_bY = float('inf')
-            if curve_idx < len(curve_names) - 1:
-                higher_curve = curve_names[curve_idx + 1]
-                higher_landings = completed_curves.get(higher_curve, [])
-                higher_bY = get_curve_bY_at_time(higher_landings, current_time)
-                if higher_bY is not None:
-                    max_bY = higher_bY - 0.001
+            best_candidate = None
+            best_score = float('inf')
+            target_rank = min(curve_idx, len(notes_available) - 1)
 
-            # Choose highest note <= max_bY that is unclaimed
-            candidate = None
-            for note, svgX, svgY, bY, noteName, end_t in sorted(notes_available, key=lambda x: x[3], reverse=True):
+            for rank, (note, svgX, svgY, bY, noteName, end_t) in enumerate(notes_available):
                 note_key = (round(current_time, 5), note)
-                if note_key in claimed_landings:
-                    continue
-                if bY <= max_bY + 0.001:
-                    candidate = (note, svgX, svgY, bY, noteName, end_t)
-                    break
 
-            if candidate is None:
+                origin_bY = current_bY if current_bY is not None else bY
+                origin_time = last_landing_time if curve_landings else current_time
+
+                if not is_position_valid(curve_idx + 1, origin_bY, origin_time,
+                                         bY, current_time, completed_curves):
+                    continue
+
+                rank_score = abs(rank - target_rank)
+                move_score = abs(bY - current_bY) if current_bY is not None else 0.0
+                usage_score = note_usage_counts[note_key]
+                total_score = (rank_score * RANK_WEIGHT) + \
+                              (move_score * MOVE_WEIGHT) + \
+                              (usage_score * USAGE_WEIGHT)
+
+                if total_score < best_score:
+                    best_score = total_score
+                    best_candidate = (note, svgX, svgY, bY, noteName, end_t, note_key)
+
+            if best_candidate is None:
                 continue
 
-            note, svgX, svgY, bY, noteName, end_t = candidate
+            note, svgX, svgY, bY, noteName, end_t, note_key = best_candidate
             curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
             current_note = note
             current_note_end = end_t
             current_bY = bY
-            claimed_landings.add((round(current_time, 5), note))
+            last_landing_time = current_time
+            note_usage_counts[note_key] += 1
+            notes_covered.add(note_key)
 
         completed_curves[curve_name] = curve_landings
+
+    missing_notes = len(all_note_keys - notes_covered)
+    if missing_notes > 0:
+        coverage_percent = (len(notes_covered) / len(all_note_keys)) * 100 if all_note_keys else 0
+        print(f"  WARNING: {missing_notes} matched notes not covered by any curve "
+              f"({coverage_percent:.1f}% coverage)")
 
     # === STEP 3: Build final curve data ===
     # Convert back to the output format (keeping both SVG and Blender coords for flexibility)
