@@ -483,11 +483,13 @@ class TestNoteHeadCoverage(unittest.TestCase):
 
     def test_last_chord_is_hit(self):
         """
-        The final chord of the piece should be hit by curves.
+        The final musical chord of the piece should be hit by curves.
         This tests that the algorithm properly handles the last notes.
 
         Note: Only notes with SVG coordinates can be hit. Some notes in the
         last chord may not have SVG representations due to matching issues.
+        The fly-off point at the very end is excluded since it just repeats
+        the last actual notes for visual continuity.
         """
         curve_landings = self.get_all_curve_landings()
 
@@ -495,11 +497,22 @@ class TestNoteHeadCoverage(unittest.TestCase):
         if not curve_landings:
             self.skipTest("No curve landings found")
 
-        max_landing_time = max(t for t, _ in curve_landings)
+        sorted_times = sorted(set(t for t, _ in curve_landings))
 
-        # Get all landings in the last 0.5 seconds (the final chord)
+        # The very last time is usually the fly-off point (end_time)
+        # Look at the second-to-last unique time cluster for the actual last chord
+        # Find times that are more than 1 second before the final time
+        max_time = sorted_times[-1]
+        musical_times = [t for t in sorted_times if t < max_time - 1.0]
+
+        if not musical_times:
+            self.skipTest("No musical landing times found before fly-off")
+
+        last_musical_time = musical_times[-1]
+
+        # Get all landings within 0.5 seconds of the last musical time
         last_chord_landings = [(t, name) for t, name in curve_landings
-                               if t >= max_landing_time - 0.5]
+                               if last_musical_time - 0.1 <= t <= last_musical_time + 0.5]
 
         # We should have multiple notes in the final chord
         unique_last_notes = set(name for _, name in last_chord_landings)
