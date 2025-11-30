@@ -713,77 +713,56 @@ def build_curve_data(data, max_curves):
     for t in notes_at_time:
         notes_at_time[t].sort(key=lambda x: x[3])  # Sort by bY ascending
 
-    # === STEP 2: Trace curves forward cooperatively per timestamp ===
-    # Iterate through each noteOn time and assign that chord's notes to curves.
+    # === STEP 2: Trace curves forward in time (bottom-up) ===
+    # Each curve walks the timeline independently while staying above
+    # all previously completed (lower-numbered) curves.
+
+    completed_curves = {}
+    notes_covered = set()
+    times_to_process = sorted(note_on_times)
 
     RANK_WEIGHT = 12.0
     MOVE_WEIGHT = 1.0
     USAGE_WEIGHT = 12.0
     COVERED_PENALTY = 25.0
 
-    curve_states = []
-    completed_curves = {}
-    notes_covered = set()
+    for curve_idx, curve_name in enumerate(curve_names):
+        curve_landings = []
 
-    for idx, curve_name in enumerate(curve_names):
-        state = {
-            'name': curve_name,
-            'landings': [],
-            'current_note': None,
-            'current_note_end': 0.0,
-            'current_bY': None,
-            'last_time': 0.0
-        }
-        curve_states.append(state)
-        completed_curves[curve_name] = state['landings']
+        current_note = None
+        current_note_end = 0.0
+        current_bY = None
+        last_landing_time = 0.0
 
-    times_to_process = sorted(note_on_times)
-
-    for current_time in times_to_process:
-        notes_available = notes_at_time.get(current_time, [])
-        if not notes_available:
-            continue
-
-        # Build mutable list of notes remaining to be assigned at this timestamp
-        notes_remaining = []
-        for rank, (note, svgX, svgY, bY, noteName, end_t) in enumerate(notes_available):
-            note_key = (round(current_time, 5), note)
-            notes_remaining.append({
-                'note': note,
-                'svgX': svgX,
-                'svgY': svgY,
-                'bY': bY,
-                'noteName': noteName,
-                'end_t': end_t,
-                'rank': rank,
-                'note_key': note_key
-            })
-
-        for curve_idx, state in enumerate(curve_states):
-            if not notes_remaining:
-                break  # All notes at this timestamp assigned
-
-            # Skip if this curve is still holding a previous note
-            if (state['current_note'] is not None and
-                    current_time < state['current_note_end'] - 0.01):
+        for current_time in times_to_process:
+            notes_available = notes_at_time.get(current_time, [])
+            if not notes_available:
                 continue
 
-            target_rank = min(curve_idx, len(notes_available) - 1)
-            best_idx = None
-            best_score = float('inf')
+            # Extend current note if it restarts at this timestamp
+            if current_note is not None and current_time < current_note_end - 0.01:
+                for note, svgX, svgY, bY, noteName, end_t in notes_available:
+                    if note == current_note and abs(bY - current_bY) < 0.01:
+                        current_note_end = max(current_note_end, end_t)
+                        break
+                continue
 
-            for idx_note, candidate in enumerate(notes_remaining):
-                note_key = candidate['note_key']
-                dest_bY = candidate['bY']
-                origin_bY = state['current_bY'] if state['current_bY'] is not None else dest_bY
-                origin_time = state['last_time'] if state['landings'] else current_time
+            best_candidate = None
+            best_score = float('inf')
+            target_rank = min(curve_idx, len(notes_available) - 1)
+
+            for rank, (note, svgX, svgY, bY, noteName, end_t) in enumerate(notes_available):
+                note_key = (round(current_time, 5), note)
+
+                origin_bY = current_bY if current_bY is not None else bY
+                origin_time = last_landing_time if curve_landings else current_time
 
                 if not is_position_valid(curve_idx + 1, origin_bY, origin_time,
-                                         dest_bY, current_time, completed_curves):
+                                         bY, current_time, completed_curves):
                     continue
 
-                rank_score = abs(candidate['rank'] - target_rank)
-                move_score = abs(dest_bY - state['current_bY']) if state['current_bY'] is not None else 0.0
+                rank_score = abs(rank - target_rank)
+                move_score = abs(bY - current_bY) if current_bY is not None else 0.0
                 usage_score = note_usage_counts[note_key]
                 covered_penalty = COVERED_PENALTY if note_key in notes_covered else 0.0
                 total_score = (rank_score * RANK_WEIGHT) + \
@@ -793,71 +772,21 @@ def build_curve_data(data, max_curves):
 
                 if total_score < best_score:
                     best_score = total_score
-                    best_idx = idx_note
+                    best_candidate = (note, svgX, svgY, bY, noteName, end_t, note_key)
 
-            if best_idx is None:
+            if best_candidate is None:
                 continue
 
-            chosen = notes_remaining.pop(best_idx)
-            state['landings'].append((
-                current_time,
-                chosen['note'],
-                chosen['svgX'],
-                chosen['svgY'],
-                chosen['bY'],
-                chosen['noteName']
-            ))
-            state['current_note'] = chosen['note']
-            state['current_note_end'] = chosen['end_t']
-            state['current_bY'] = chosen['bY']
-            state['last_time'] = current_time
+            note, svgX, svgY, bY, noteName, end_t, note_key = best_candidate
+            curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
+            current_note = note
+            current_note_end = end_t
+            current_bY = bY
+            last_landing_time = current_time
+            note_usage_counts[note_key] += 1
+            notes_covered.add(note_key)
 
-            note_usage_counts[chosen['note_key']] += 1
-            notes_covered.add(chosen['note_key'])
-
-        if notes_remaining:
-            # As a fallback, force-assign remaining notes to the closest available curve
-            for leftover in notes_remaining:
-                best_curve = None
-                best_score = float('inf')
-                for curve_idx, state in enumerate(curve_states):
-                    if (state['current_note'] is not None and
-                            current_time < state['current_note_end'] - 0.01):
-                        continue
-
-                    origin_bY = state['current_bY'] if state['current_bY'] is not None else leftover['bY']
-                    origin_time = state['last_time'] if state['landings'] else current_time
-
-                    if not is_position_valid(curve_idx + 1, origin_bY, origin_time,
-                                             leftover['bY'], current_time, completed_curves):
-                        continue
-
-                    move_score = abs(leftover['bY'] - state['current_bY']) if state['current_bY'] is not None else 0.0
-                    if move_score < best_score:
-                        best_score = move_score
-                        best_curve = (curve_idx, state)
-
-                if best_curve is None:
-                    continue  # Give up on this note (should be rare)
-
-                curve_idx, state = best_curve
-                state['landings'].append((
-                    current_time,
-                    leftover['note'],
-                    leftover['svgX'],
-                    leftover['svgY'],
-                    leftover['bY'],
-                    leftover['noteName']
-                ))
-                state['current_note'] = leftover['note']
-                state['current_note_end'] = leftover['end_t']
-                state['current_bY'] = leftover['bY']
-                state['last_time'] = current_time
-
-                note_usage_counts[leftover['note_key']] += 1
-                notes_covered.add(leftover['note_key'])
-
-    completed_curves = {state['name']: state['landings'] for state in curve_states}
+        completed_curves[curve_name] = curve_landings
 
     missing_notes = len(all_note_keys - notes_covered)
     if missing_notes > 0:
