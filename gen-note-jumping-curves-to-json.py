@@ -707,15 +707,12 @@ def build_curve_data(data, max_curves):
     for t in notes_at_time:
         notes_at_time[t].sort(key=lambda x: x[3])  # Sort by bY ascending
 
-    # === STEP 2: Trace curves individually (top-down) to maintain ordering ===
-    #
-    # We process curves from TOP (curve7) down to BOTTOM (curve1) so that when
-    # assigning notes to a lower curve we already know the trajectory of the
-    # curve above it. This lets us keep curve_i's Blender Y <= curve_{i+1}'s
-    # Blender Y at all times.
+    # === STEP 2: Trace curves forward in time (top-down) ===
+    # Process curves from top (curve7) down to bottom so each lower curve
+    # knows the upper bound imposed by the curve above it.
 
     completed_curves = {}
-    claimed_landings = set()  # (time, note) pairs already used by higher curves
+    claimed_landings = set()  # (time, note) pairs already used
 
     times_to_process = sorted(note_on_times)
 
@@ -732,40 +729,35 @@ def build_curve_data(data, max_curves):
             if not notes_available:
                 continue
 
-            # If we're still on a note that hasn't ended, extend its duration
+            # Extend current note if it restarts
             if current_note is not None and current_time < current_note_end - 0.01:
                 for note, svgX, svgY, bY, noteName, end_t in notes_available:
-                    if note == current_note and end_t > current_note_end:
-                        current_note_end = end_t
+                    if note == current_note and abs(bY - current_bY) < 0.01:
+                        current_note_end = max(current_note_end, end_t)
                         break
-                continue  # Keep holding the current note
-
-            # Need a new landing either because we never landed or note ended
-            if current_note is not None and current_time < current_note_end - 0.01:
                 continue
 
-            # Determine the maximum allowed bY to avoid crossing the curve above
+            # Determine max bY allowed to avoid crossing higher curve
             max_bY = float('inf')
             if curve_idx < len(curve_names) - 1:
                 higher_curve = curve_names[curve_idx + 1]
                 higher_landings = completed_curves.get(higher_curve, [])
                 higher_bY = get_curve_bY_at_time(higher_landings, current_time)
                 if higher_bY is not None:
-                    max_bY = higher_bY - 0.001  # stay just below the higher curve
+                    max_bY = higher_bY - 0.001
 
-            # Choose the HIGHEST available note that does not exceed max_bY
+            # Choose highest note <= max_bY that is unclaimed
             candidate = None
-            for note, svgX, svgY, bY, noteName, end_t in sorted(notes_available, key=lambda x: x[3]):
+            for note, svgX, svgY, bY, noteName, end_t in sorted(notes_available, key=lambda x: x[3], reverse=True):
                 note_key = (round(current_time, 5), note)
                 if note_key in claimed_landings:
                     continue
                 if bY <= max_bY + 0.001:
                     candidate = (note, svgX, svgY, bY, noteName, end_t)
-                else:
-                    break  # notes sorted ascending bY, so remaining will be higher
+                    break
 
             if candidate is None:
-                continue  # No valid note at this time for this curve
+                continue
 
             note, svgX, svgY, bY, noteName, end_t = candidate
             curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
