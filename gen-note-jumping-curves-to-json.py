@@ -831,9 +831,11 @@ def build_curve_data(data, max_curves):
                 best_landing = equal_or_greater_best
 
             if best_landing is None:
-                # No valid position found - use the highest bY available
-                print(f"WARNING: No valid bY for {curve_name} at t={current_time}, using highest available")
-                best_landing = notes_available[-1]  # highest bY (notes are sorted ascending)
+                # No valid position found - SKIP this landing entirely
+                # The curve will continue on its previous note (or from the next future landing)
+                if debug_this:
+                    print(f"  -> SKIPPING t={current_time:.2f} for {curve_name} - no valid note")
+                continue
 
             note, svgX, svgY, bY, noteName, end_t = best_landing
             curve_landings.append((current_time, note, svgX, svgY, bY, noteName))
