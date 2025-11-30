@@ -393,17 +393,24 @@ def build_curve_data(data, max_curves):
 
     CONCEPT:
     - All 7 curves bounce continuously from start to end (no waiting!)
-    - By default, all curves follow the "bass line" (lowest active note)
-    - When extra notes need to be played, curves "split off" to handle them
-    - When a curve's note ends (noteOff), it "merges back" to the bass line
-    - When merged, multiple curves land on the same note (visually appearing as one blob)
+    - Curves are assigned to notes maintaining the INVARIANT:
+      curve1.Y <= curve2.Y <= ... <= curveN.Y at ALL times (Blender Y)
+    - Since higher svgY = lower Blender Y, this means:
+      curve1.svgY >= curve2.svgY >= ... >= curveN.svgY
+    - This prevents curves from ever crossing each other visually
 
-    RULES:
-    1. Every curve must have a landing at every noteOn timestamp (no gaps!)
-    2. Curves are assigned to notes from lowest to highest pitch
-    3. Extra curves (when fewer notes than curves) stack on the lowest note (bass)
-    4. When a curve's note ends, it merges back to the bass on the NEXT noteOn
-    5. NO Y-ONLY JUMPS: handled by always jumping to a new noteOn (different X)
+    ALGORITHM - BACKWARDS IN TIME:
+    We process timestamps from END to BEGINNING.
+
+    1. At the end, all curves converge to the fly-off point (invariant trivially satisfied)
+    2. Working backwards, we know where each curve is GOING (its "future" = already assigned)
+    3. At each landing timestamp, we assign ORIGINS (where curves came from)
+    4. curve1 ALWAYS gets the highest svgY origin (lowest Blender Y)
+    5. curve2 gets the next highest svgY, and so on
+
+    This ensures the invariant is maintained because:
+    - curve1's origin has highest svgY, curve1's destination has highest svgY (among landing curves)
+    - The arc between them will also maintain the Y-ordering
 
     Returns a dict: {'curve1': [...], 'curve2': [...], ...}
     Each curve's list contains dicts: {noteName, svgX, svgY, timestamp, note, pointType}
@@ -413,28 +420,20 @@ def build_curve_data(data, max_curves):
     if not events:
         return {}, 0, 0
 
-    # Find the end time of the song (last noteOff time)
     end_time = max(e[0] for e in events) + 1.0
     start_time = min(e[0] for e in events)
 
-    # Initialize curve data structure
-    curves = {f'curve{i+1}': [] for i in range(max_curves)}
     curve_names = [f'curve{i+1}' for i in range(max_curves)]
 
-    # Build a list of all noteOn timestamps with their active notes at that moment
-    # We need to track what notes are active at each noteOn timestamp
-
-    # First, collect all noteOn events with their info
-    note_on_events = []  # [(time, note, event), ...]
+    # Collect all noteOn events
+    note_on_events = []
     for time, event_type, event in events:
         if event_type == 'noteOn':
             note_on_events.append((time, event.get('note'), event))
 
-    # Build a map of note durations: note_num -> [(start_time, end_time), ...]
-    # Handle polyphony by tracking multiple instances
-    note_instances = {}  # note_num -> [(start, end), ...]
-    active_starts = {}   # note_num -> [start_times currently active]
-
+    # Build note duration map: note_num -> [(start, end), ...]
+    note_instances = {}
+    active_starts = {}
     for time, event_type, event in events:
         note_num = event.get('note')
         if event_type == 'noteOn':
@@ -443,131 +442,247 @@ def build_curve_data(data, max_curves):
             active_starts[note_num].append(time)
         elif event_type == 'noteOff':
             if note_num in active_starts and active_starts[note_num]:
-                start = active_starts[note_num].pop(0)  # FIFO
+                start_t = active_starts[note_num].pop(0)
                 if note_num not in note_instances:
                     note_instances[note_num] = []
-                note_instances[note_num].append((start, time))
+                note_instances[note_num].append((start_t, time))
 
-    # Function to check if a note is active at a given time
-    def is_note_active(note_num, time):
-        if note_num not in note_instances:
-            return False
-        for start, end in note_instances[note_num]:
-            if start <= time < end:
-                return True
-        return False
-
-    # Get all unique noteOn timestamps
-    note_on_times = sorted(set(t for t, n, e in note_on_events))
-
-    if not note_on_times:
-        return curves, start_time, end_time
-
-    # Find the first noteOn event for the starting position
-    first_time = note_on_times[0]
-    first_events = [(t, n, e) for t, n, e in note_on_events if t == first_time]
-    first_event = min(first_events, key=lambda x: x[1])[2]  # Lowest pitch
-
-    # All curves start at the first note position (timestamp 0.0)
-    start_point = {
-        'noteName': first_event.get('name', ''),
-        'note': first_event.get('note', 0),
-        'svgX': first_event.get('svgX', 0),
-        'svgY': first_event.get('svgY', 0),
-        'timestamp': 0.0,
-        'pointType': 'start'
-    }
-    for curve_name in curves:
-        curves[curve_name].append(start_point.copy())
-
-    # Build a lookup from (time, note) -> event
+    # Build lookup from (time, note) -> event
     event_lookup = {}
     for time, note, event in note_on_events:
         event_lookup[(time, note)] = event
 
-    # Track what note each curve was on at the previous timestamp
-    # Only add a landing if the curve's note CHANGES or if it's a new noteOn
-    prev_curve_notes = {cn: None for cn in curve_names}
+    note_on_times = sorted(set(t for t, n, e in note_on_events))
+    if not note_on_times:
+        return {cn: [] for cn in curve_names}, start_time, end_time
 
-    # Process each noteOn timestamp
-    for current_time in note_on_times:
-        # Find all notes that are active at this timestamp
-        # A note is active if it started at or before this time and hasn't ended yet
-        active_notes = set()
-        for note_num in note_instances:
-            if is_note_active(note_num, current_time):
-                active_notes.add(note_num)
+    # === STEP 1: Identify all landing events and their timestamps ===
+    #
+    # First, we need to know WHEN each curve lands (changes notes).
+    # A curve lands when its current note ends OR when a new note starts (re-attack).
 
-        # Also add notes that START at this timestamp
-        notes_starting_now = set()
+    first_time = note_on_times[0]
+    first_events_list = [(t, n, e) for t, n, e in note_on_events if t == first_time]
+    first_event = min(first_events_list, key=lambda x: x[1])[2]
+
+    # For each curve, track: current_note, note_end_time
+    curve_note_state = {}
+    for cn in curve_names:
+        note_num = first_event.get('note', 0)
+        end_t = end_time
+        for s, e in note_instances.get(note_num, []):
+            if s == first_time:
+                end_t = e
+                break
+        curve_note_state[cn] = {'note': note_num, 'end_time': end_t, 'start_time': first_time}
+
+    # landing_times[cn] = [t1, t2, ...] - times when curve cn lands on a new note
+    landing_times = {cn: [first_time] for cn in curve_names}
+
+    for current_time in note_on_times[1:]:
+        notes_now = []
         for t, n, e in note_on_events:
             if t == current_time:
-                active_notes.add(n)
-                notes_starting_now.add(n)
+                end_t = end_time
+                for s, et in note_instances.get(n, []):
+                    if s == current_time:
+                        end_t = et
+                        break
+                notes_now.append((n, e.get('svgY', 0), e, end_t))
 
-        # Sort active notes by pitch (lowest first)
-        sorted_notes = sorted(active_notes)
+        if not notes_now:
+            continue
 
-        # Assign curves to notes:
-        # - First N curves go to the N active notes (1 curve per note)
-        # - Extra curves (if fewer notes than curves) stack on the LOWEST note (bass)
+        # Find curves that need to land (their note ended or same note re-attacked)
+        curves_landing = []
+        for cn in curve_names:
+            state = curve_note_state[cn]
+            if state['end_time'] <= current_time:
+                curves_landing.append(cn)
+            elif current_time in [t for t, n, e in note_on_events if n == state['note']]:
+                curves_landing.append(cn)
 
-        num_notes = len(sorted_notes)
+        if not curves_landing:
+            continue
 
-        for curve_idx, curve_name in enumerate(curve_names):
-            if curve_idx < num_notes:
-                # This curve gets its own note
-                note_num = sorted_notes[curve_idx]
-            else:
-                # Extra curve - stack on the bass (lowest note)
-                note_num = sorted_notes[0] if sorted_notes else None
+        # Assign notes to landing curves (naive assignment for now)
+        notes_now.sort(key=lambda x: -x[1])  # Sort by svgY descending
+        for i, cn in enumerate(curves_landing):
+            note_idx = i % len(notes_now)
+            note_num, svgY, evt, end_t = notes_now[note_idx]
+            curve_note_state[cn] = {'note': note_num, 'end_time': end_t, 'start_time': current_time}
+            landing_times[cn].append(current_time)
 
-            if note_num is None:
-                continue
+    # === STEP 2: Build destination info for each landing ===
+    #
+    # For each curve at each landing time, what note does it land on?
+    # We'll rebuild this going forward, then fix it going backward.
 
-            # Check if we should add a landing point:
-            # 1. This note just started (noteOn at this timestamp), OR
-            # 2. The curve's assigned note changed from the previous timestamp
-            prev_note = prev_curve_notes[curve_name]
-            note_just_started = note_num in notes_starting_now
-            note_changed = (prev_note != note_num)
+    # Reset state
+    for cn in curve_names:
+        note_num = first_event.get('note', 0)
+        end_t = end_time
+        for s, e in note_instances.get(note_num, []):
+            if s == first_time:
+                end_t = e
+                break
+        curve_note_state[cn] = {'note': note_num, 'end_time': end_t}
 
-            if not note_just_started and not note_changed:
-                # Curve stays on the same sustained note - no new landing needed
-                continue
+    # landing_info[cn] = [(time, note, svgX, svgY, noteName), ...]
+    landing_info = {cn: [] for cn in curve_names}
 
-            # Find the event for this note at this time (or use active note's original event)
-            event = event_lookup.get((current_time, note_num))
-            if event is None:
-                # Note is active but didn't start at this time - find its original event
-                for t, n, e in note_on_events:
-                    if n == note_num and t <= current_time:
-                        if is_note_active(note_num, current_time):
-                            event = e
-                            break
+    # Add first landing for all curves
+    for cn in curve_names:
+        landing_info[cn].append((
+            first_time,
+            first_event.get('note', 0),
+            first_event.get('svgX', 0),
+            first_event.get('svgY', 0),
+            first_event.get('name', '')
+        ))
 
-            if event is None:
-                continue
+    for current_time in note_on_times[1:]:
+        notes_now = []
+        for t, n, e in note_on_events:
+            if t == current_time:
+                end_t = end_time
+                for s, et in note_instances.get(n, []):
+                    if s == current_time:
+                        end_t = et
+                        break
+                notes_now.append((n, e.get('svgY', 0), e, end_t))
 
-            # Update tracking
-            prev_curve_notes[curve_name] = note_num
+        if not notes_now:
+            continue
 
-            # Add landing point for this curve
-            point = {
-                'noteName': event.get('name', ''),
-                'note': note_num,
-                'svgX': event.get('svgX', 0),
-                'svgY': event.get('svgY', 0),
-                'timestamp': current_time,
-                'pointType': 'landing'
-            }
-            curves[curve_name].append(point)
+        curves_landing = []
+        for cn in curve_names:
+            state = curve_note_state[cn]
+            if state['end_time'] <= current_time:
+                curves_landing.append(cn)
+            elif current_time in [t for t, n, e in note_on_events if n == state['note']]:
+                curves_landing.append(cn)
 
-    # All curves end at end_time, jumping off to the right
-    # Use each curve's LAST position for the end point
-    for curve_name in curves:
-        if curves[curve_name]:
-            last_point = curves[curve_name][-1]
+        if not curves_landing:
+            continue
+
+        notes_now.sort(key=lambda x: -x[1])
+        for i, cn in enumerate(curves_landing):
+            note_idx = i % len(notes_now)
+            note_num, svgY, evt, end_t = notes_now[note_idx]
+            curve_note_state[cn] = {'note': note_num, 'end_time': end_t}
+            landing_info[cn].append((
+                current_time,
+                note_num,
+                evt.get('svgX', 0),
+                evt.get('svgY', 0),
+                evt.get('name', '')
+            ))
+
+    # === STEP 3: BACKWARDS PASS - Reassign origins to maintain invariant ===
+    #
+    # Process from end to beginning. At each timestamp where curves land:
+    # - We know where the curves are GOING (future destinations, already fixed)
+    # - We assign where they CAME FROM (origins)
+    # - curve1 gets the origin with highest svgY (lowest Blender Y)
+    # - curve2 gets next highest, etc.
+
+    # Get all unique landing timestamps
+    all_landing_times = set()
+    for cn in curve_names:
+        for t, note, svgX, svgY, noteName in landing_info[cn]:
+            all_landing_times.add(t)
+    all_landing_times = sorted(all_landing_times, reverse=True)  # Latest first
+
+    # For each curve, store its final (corrected) landing sequence
+    # We build this backwards and reverse at the end
+    final_landings = {cn: [] for cn in curve_names}
+
+    # Track each curve's "future" position (where it will be after current timestamp)
+    # Initialize with the last landing for each curve
+    curve_future = {}
+    for cn in curve_names:
+        if landing_info[cn]:
+            last = landing_info[cn][-1]
+            curve_future[cn] = {'svgY': last[3], 'time': last[0]}
+            final_landings[cn].append(last)  # Add last landing
+
+    # Process timestamps backwards (skip the very last, already handled)
+    for current_time in all_landing_times[1:]:
+        # Find which curves land at this timestamp
+        curves_at_time = []
+        origins_at_time = []  # The destinations they land ON (which become origins going backwards)
+
+        for cn in curve_names:
+            for landing in landing_info[cn]:
+                if landing[0] == current_time:
+                    curves_at_time.append(cn)
+                    origins_at_time.append(landing)
+                    break
+
+        if not curves_at_time:
+            continue
+
+        # Get unique origin positions (note, svgX, svgY, noteName)
+        unique_origins = []
+        seen = set()
+        for t, note, svgX, svgY, noteName in origins_at_time:
+            key = (note, svgX, svgY)
+            if key not in seen:
+                seen.add(key)
+                unique_origins.append((note, svgX, svgY, noteName))
+
+        # Sort origins by svgY DESCENDING (highest svgY = lowest Blender Y = curve1's slot)
+        unique_origins.sort(key=lambda x: -x[2])
+
+        # Sort the landing curves by curve number (curve1, curve2, ...)
+        # curve1 should get the highest svgY origin
+        curves_at_time_sorted = sorted(curves_at_time, key=lambda cn: int(cn.replace('curve', '')))
+
+        # Assign origins: curve1 gets highest svgY, curve2 gets next, etc.
+        for i, cn in enumerate(curves_at_time_sorted):
+            origin_idx = min(i, len(unique_origins) - 1)
+            note, svgX, svgY, noteName = unique_origins[origin_idx]
+
+            final_landings[cn].append((current_time, note, svgX, svgY, noteName))
+            curve_future[cn] = {'svgY': svgY, 'time': current_time}
+
+    # === STEP 4: Build final curve data ===
+
+    curves = {}
+    for cn in curve_names:
+        points = []
+
+        # Reverse to get chronological order
+        landings = list(reversed(final_landings[cn]))
+
+        # Add start point (fly-in)
+        start_point = {
+            'noteName': first_event.get('name', ''),
+            'note': first_event.get('note', 0),
+            'svgX': first_event.get('svgX', 0),
+            'svgY': first_event.get('svgY', 0),
+            'timestamp': 0.0,
+            'pointType': 'start'
+        }
+        points.append(start_point)
+
+        # Add landing points
+        for t, note, svgX, svgY, noteName in landings:
+            if t > 0:
+                point = {
+                    'noteName': noteName,
+                    'note': note,
+                    'svgX': svgX,
+                    'svgY': svgY,
+                    'timestamp': t,
+                    'pointType': 'landing'
+                }
+                points.append(point)
+
+        # Add end point (fly-off)
+        if points:
+            last_point = points[-1]
             end_point = {
                 'noteName': last_point['noteName'],
                 'note': last_point['note'],
@@ -576,7 +691,9 @@ def build_curve_data(data, max_curves):
                 'timestamp': end_time,
                 'pointType': 'end'
             }
-            curves[curve_name].append(end_point)
+            points.append(end_point)
+
+        curves[cn] = points
 
     return curves, start_time, end_time
 
