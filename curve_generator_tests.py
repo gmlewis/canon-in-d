@@ -899,6 +899,56 @@ class TestCurvesPost180(unittest.TestCase):
         self.assertEqual(0, len(violations), "Ordering violated after 180.9s")
 
 
+class TestTiedChordLandings(unittest.TestCase):
+    """Tests to ensure tied duplicate note heads are not treated as new landings."""
+
+    JSON_FILE = "note-jumping-curves.json"
+    PRE_TIE_TIME = 239.6996
+    PRE_TIE_WINDOW = 0.05
+    TIE_DUPLICATE_WINDOW = (241.7, 242.05)
+    TIE_NOTES = {"C#4", "A4", "C#5"}
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.JSON_FILE, 'r') as f:
+            curves_data = json.load(f)
+
+        cls.curve_names = ['curve1', 'curve2', 'curve3', 'curve4', 'curve5', 'curve6', 'curve7']
+        cls.landings = []
+        for cn in cls.curve_names:
+            curve = curves_data.get('curves', {}).get(cn, {})
+            for pt in curve.get('points', []):
+                if pt.get('type') == 'landing':
+                    cls.landings.append(pt)
+
+    def test_pre_tie_chord_landings_exist(self):
+        """Ensure the original (pre-tie) notes all receive landings."""
+        hits = {note: False for note in self.TIE_NOTES}
+        for pt in self.landings:
+            if abs(pt['timestamp'] - self.PRE_TIE_TIME) <= self.PRE_TIE_WINDOW:
+                note_name = pt.get('noteName', '')
+                if note_name in hits:
+                    hits[note_name] = True
+
+        missing = [note for note, hit in hits.items() if not hit]
+        self.assertEqual([], missing,
+                         f"Missing landings for tied notes at ~{self.PRE_TIE_TIME:.3f}s: {missing}")
+
+    def test_tied_duplicates_have_no_landings(self):
+        """Verify that visually duplicated tied note heads receive no extra landings."""
+        early, late = self.TIE_DUPLICATE_WINDOW
+        violations = []
+        for pt in self.landings:
+            t = pt['timestamp']
+            note_name = pt.get('noteName', '')
+            if early <= t <= late and note_name in self.TIE_NOTES:
+                violations.append((t, note_name))
+
+        self.assertEqual([], violations,
+                         "Found landings on tied duplicate note heads: "
+                         f"{[(round(t, 3), n) for t, n in violations]}")
+
+
 def run_tests():
     """Run all tests and return True if all pass."""
     # Create a test suite
