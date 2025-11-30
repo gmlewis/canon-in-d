@@ -11,7 +11,8 @@
    - Regular Python scripts that do not use the `bpy` module and are
      invokable from the command line with bash "shebang" (e.g. `#!/usr/bin/env python3`).
 
-3. Unit tests should be run regularly by running `./test-all.sh`.
+3. Unit tests should be run regularly by running `./test-all.sh`
+   (this script invokes `pytest curve_generator_tests.py`).
 
 4. Please remember that when "bouncing arcs" are discussed, the bounces
    always happen in the Blender Z axis (up/down), never in X or Y. This
@@ -28,3 +29,8 @@
    on the landing points and their midpoints only and ignore the fly-in and\
    fly-out segments.
 
+6. Current regression focus: behavior is solid through note
+   `note_x105151_B3_t180p90_1217`, but after ~180.9s a number of tests
+   intentionally fail (missing landings and ordering issues).
+   Preserve the pre-180s success while iterating on fixes for the later
+   section, and keep those diagnostic tests intact.
