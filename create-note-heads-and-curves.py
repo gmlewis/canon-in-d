@@ -244,7 +244,9 @@ def optimize_path_grouping(curves_data):
     if num_curves < 2:
         return 0
 
-    # Build index: for each curve, map x_position (rounded) -> point_index for landings
+    # Build index: for each curve, map timestamp (rounded) -> point_index for landings
+    # Using timestamp instead of X position because curves at the same timestamp
+    # can land at slightly different X positions (due to different note head positions)
     def build_landing_index(curves_data, curve_names):
         curve_landing_indices = {}
         for curve_name in curve_names:
@@ -252,20 +254,21 @@ def optimize_path_grouping(curves_data):
             landing_indices = {}
             for i, point in enumerate(points):
                 if point.get('type') == 'landing':
-                    x_key = round(point['x'], 6)
-                    landing_indices[x_key] = i
+                    # Use timestamp as key, rounded to 6 decimal places
+                    t_key = round(point.get('timestamp', 0), 6)
+                    landing_indices[t_key] = i
             curve_landing_indices[curve_name] = landing_indices
         return curve_landing_indices
 
     curve_landing_indices = build_landing_index(curves_data, curve_names)
 
-    # Get all unique X positions where landings occur, sorted chronologically
-    all_x_positions = set()
+    # Get all unique timestamps where landings occur, sorted chronologically
+    all_timestamps = set()
     for curve_name in curve_names:
-        all_x_positions.update(curve_landing_indices[curve_name].keys())
-    sorted_x_positions = sorted(all_x_positions)
+        all_timestamps.update(curve_landing_indices[curve_name].keys())
+    sorted_timestamps = sorted(all_timestamps)
 
-    if len(sorted_x_positions) < 2:
+    if len(sorted_timestamps) < 2:
         return 0
 
     swap_count = 0
@@ -278,29 +281,29 @@ def optimize_path_grouping(curves_data):
         # Rebuild the landing index after any swaps from previous pass
         curve_landing_indices = build_landing_index(curves_data, curve_names)
 
-        # Check each pair of consecutive X positions for crossings
-        for x_idx in range(len(sorted_x_positions) - 1):
-            x_current = sorted_x_positions[x_idx]
-            x_next = sorted_x_positions[x_idx + 1]
+        # Check each pair of consecutive timestamps for crossings
+        for t_idx in range(len(sorted_timestamps) - 1):
+            t_current = sorted_timestamps[t_idx]
+            t_next = sorted_timestamps[t_idx + 1]
 
-            # Get all curves that have landings at BOTH positions
+            # Get all curves that have landings at BOTH timestamps
             curves_at_both = []
             for curve_name in curve_names:
-                if x_current in curve_landing_indices[curve_name] and \
-                   x_next in curve_landing_indices[curve_name]:
+                if t_current in curve_landing_indices[curve_name] and \
+                   t_next in curve_landing_indices[curve_name]:
                     curves_at_both.append(curve_name)
 
             if len(curves_at_both) < 2:
                 continue
 
-            # Get Y values at current and next position for these curves
+            # Get Y values at current and next timestamp for these curves
             y_current = {}
             y_next = {}
             note_current = {}
             note_next = {}
             for curve_name in curves_at_both:
-                idx_current = curve_landing_indices[curve_name][x_current]
-                idx_next = curve_landing_indices[curve_name][x_next]
+                idx_current = curve_landing_indices[curve_name][t_current]
+                idx_next = curve_landing_indices[curve_name][t_next]
                 y_current[curve_name] = curves_data[curve_name]['points'][idx_current]['y']
                 y_next[curve_name] = curves_data[curve_name]['points'][idx_next]['y']
                 note_current[curve_name] = curves_data[curve_name]['points'][idx_current].get('note', 0)
@@ -323,22 +326,22 @@ def optimize_path_grouping(curves_data):
                         if a_above_b_current != a_above_b_next:
                             # Crossing detected!
                             # Find the divergence point by working backwards
-                            divergence_x = find_divergence_point(
+                            divergence_t = find_divergence_point(
                                 curves_data, curve_a, curve_b,
-                                x_current, sorted_x_positions[:x_idx+1],
+                                t_current, sorted_timestamps[:t_idx+1],
                                 curve_landing_indices
                             )
 
-                            if divergence_x is not None:
-                                # Swap the curve paths from AFTER divergence_x to x_next
-                                # We don't swap AT divergence_x because that's where they're together
-                                swap_start_idx = sorted_x_positions.index(divergence_x) + 1
-                                if swap_start_idx <= x_idx + 1:
-                                    swap_start_x = sorted_x_positions[swap_start_idx]
+                            if divergence_t is not None:
+                                # Swap the curve paths from AFTER divergence_t to t_next
+                                # We don't swap AT divergence_t because that's where they're together
+                                swap_start_idx = sorted_timestamps.index(divergence_t) + 1
+                                if swap_start_idx <= t_idx + 1:
+                                    swap_start_t = sorted_timestamps[swap_start_idx]
                                     swapped = swap_curve_paths(
                                         curves_data, curve_a, curve_b,
-                                        swap_start_x, x_next,
-                                        sorted_x_positions, curve_landing_indices
+                                        swap_start_t, t_next,
+                                        sorted_timestamps, curve_landing_indices
                                     )
                                     if swapped:
                                         swap_count += 1
@@ -355,61 +358,61 @@ def optimize_path_grouping(curves_data):
     return swap_count
 
 
-def find_divergence_point(curves_data, curve_a, curve_b, current_x, prior_x_positions, curve_landing_indices):
+def find_divergence_point(curves_data, curve_a, curve_b, current_t, prior_timestamps, curve_landing_indices):
     """
-    Find the X position where curve_a and curve_b diverged from a common path.
+    Find the timestamp where curve_a and curve_b diverged from a common path.
 
-    We work backwards through prior_x_positions to find where both curves
+    We work backwards through prior_timestamps to find where both curves
     were at the same Y position (landing on the same note). This is the point
     from which we should swap their paths.
 
     Args:
         curves_data: Dict of curve data
         curve_a, curve_b: Names of the two curves that are crossing
-        current_x: The X position where we detected the crossing
-        prior_x_positions: List of X positions before and including current_x
-        curve_landing_indices: Mapping of curve_name -> x_pos -> point_index
+        current_t: The timestamp where we detected the crossing
+        prior_timestamps: List of timestamps before and including current_t
+        curve_landing_indices: Mapping of curve_name -> timestamp -> point_index
 
     Returns:
-        The X position where divergence occurred, or None if not found
+        The timestamp where divergence occurred, or None if not found
     """
     Y_TOLERANCE = 0.01  # How close Y values need to be to be considered "same position"
 
-    # Work backwards through prior X positions
-    for x_pos in reversed(prior_x_positions):
-        # Check if both curves have landings at this position
-        if x_pos not in curve_landing_indices[curve_a] or \
-           x_pos not in curve_landing_indices[curve_b]:
+    # Work backwards through prior timestamps
+    for t_pos in reversed(prior_timestamps):
+        # Check if both curves have landings at this timestamp
+        if t_pos not in curve_landing_indices[curve_a] or \
+           t_pos not in curve_landing_indices[curve_b]:
             continue
 
-        idx_a = curve_landing_indices[curve_a][x_pos]
-        idx_b = curve_landing_indices[curve_b][x_pos]
+        idx_a = curve_landing_indices[curve_a][t_pos]
+        idx_b = curve_landing_indices[curve_b][t_pos]
         y_a = curves_data[curve_a]['points'][idx_a]['y']
         y_b = curves_data[curve_b]['points'][idx_b]['y']
 
         # If they're at the same Y position, this is where they were together
         if abs(y_a - y_b) < Y_TOLERANCE:
-            return x_pos
+            return t_pos
 
         # Also check if they're on the same MIDI note
         note_a = curves_data[curve_a]['points'][idx_a].get('note', -1)
         note_b = curves_data[curve_b]['points'][idx_b].get('note', -1)
         if note_a == note_b and note_a != -1:
-            return x_pos
+            return t_pos
 
-    # If we didn't find a clear divergence point, return the earliest position
+    # If we didn't find a clear divergence point, return the earliest timestamp
     # where both curves have landings
-    for x_pos in prior_x_positions:
-        if x_pos in curve_landing_indices[curve_a] and \
-           x_pos in curve_landing_indices[curve_b]:
-            return x_pos
+    for t_pos in prior_timestamps:
+        if t_pos in curve_landing_indices[curve_a] and \
+           t_pos in curve_landing_indices[curve_b]:
+            return t_pos
 
     return None
 
 
-def swap_curve_paths(curves_data, curve_a, curve_b, start_x, end_x, sorted_x_positions, curve_landing_indices):
+def swap_curve_paths(curves_data, curve_a, curve_b, start_t, end_t, sorted_timestamps, curve_landing_indices):
     """
-    Swap the paths of curve_a and curve_b from start_x to end_x (inclusive).
+    Swap the paths of curve_a and curve_b from start_t to end_t (inclusive).
 
     This swaps all point data (x, y, svgX, svgY, note, noteName) between
     the two curves for all landing points in the specified range.
@@ -418,36 +421,37 @@ def swap_curve_paths(curves_data, curve_a, curve_b, start_x, end_x, sorted_x_pos
     Args:
         curves_data: Dict of curve data (modified in place)
         curve_a, curve_b: Names of the two curves to swap
-        start_x: X position to start swapping (inclusive)
-        end_x: X position to end swapping (inclusive)
-        sorted_x_positions: All X positions in chronological order
-        curve_landing_indices: Mapping of curve_name -> x_pos -> point_index
+        start_t: Timestamp to start swapping (inclusive)
+        end_t: Timestamp to end swapping (inclusive)
+        sorted_timestamps: All timestamps in chronological order
+        curve_landing_indices: Mapping of curve_name -> timestamp -> point_index
 
     Returns:
         True if swap was performed, False otherwise
     """
-    # Find the X positions in the swap range
-    swap_x_positions = [x for x in sorted_x_positions if start_x <= x <= end_x]
+    # Find the timestamps in the swap range
+    swap_timestamps = [t for t in sorted_timestamps if start_t <= t <= end_t]
 
-    if not swap_x_positions:
+    if not swap_timestamps:
         return False
 
     points_a = curves_data[curve_a]['points']
     points_b = curves_data[curve_b]['points']
 
-    # For each X position in the range, swap the landing point data
-    for x_pos in swap_x_positions:
-        if x_pos not in curve_landing_indices[curve_a] or \
-           x_pos not in curve_landing_indices[curve_b]:
+    # For each timestamp in the range, swap the landing point data
+    for t_pos in swap_timestamps:
+        if t_pos not in curve_landing_indices[curve_a] or \
+           t_pos not in curve_landing_indices[curve_b]:
             continue
 
-        idx_a = curve_landing_indices[curve_a][x_pos]
-        idx_b = curve_landing_indices[curve_b][x_pos]
+        idx_a = curve_landing_indices[curve_a][t_pos]
+        idx_b = curve_landing_indices[curve_b][t_pos]
 
-        # Swap the key landing point attributes
-        for key in ['y', 'svgY', 'note', 'noteName']:
-            points_a[idx_a][key], points_b[idx_b][key] = \
-                points_b[idx_b][key], points_a[idx_a][key]
+        # Swap the key landing point attributes (including x and svgX for proper positioning)
+        for key in ['x', 'y', 'svgX', 'svgY', 'note', 'noteName']:
+            if key in points_a[idx_a] and key in points_b[idx_b]:
+                points_a[idx_a][key], points_b[idx_b][key] = \
+                    points_b[idx_b][key], points_a[idx_a][key]
 
         # Also swap the arc_peak point that precedes this landing (if exists)
         # The arc_peak is typically at idx - 1
@@ -456,8 +460,9 @@ def swap_curve_paths(curves_data, curve_a, curve_b, start_x, end_x, sorted_x_pos
             peak_idx_a = idx_a - 1
             peak_idx_b = idx_b - 1
             for key in ['y', 'svgY', 'noteName']:
-                points_a[peak_idx_a][key], points_b[peak_idx_b][key] = \
-                    points_b[peak_idx_b][key], points_a[peak_idx_a][key]
+                if key in points_a[peak_idx_a] and key in points_b[peak_idx_b]:
+                    points_a[peak_idx_a][key], points_b[peak_idx_b][key] = \
+                        points_b[peak_idx_b][key], points_a[peak_idx_a][key]
 
     return True
 
