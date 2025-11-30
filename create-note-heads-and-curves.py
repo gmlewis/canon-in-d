@@ -25,7 +25,7 @@ import os
 JSON_FILE = "note-jumping-curves.json"
 
 # Note Heads SVG file
-NOTE_HEADS_SVG_FILE = "Canon_in_D-single-svg_printing_NoteHeads_renamed.svg"
+NOTE_HEADS_SVG_FILE = "Canon_in_D-single-svg-printing_NoteHeads_renamed.svg"
 NOTE_HEADS_COLLECTION_NAME = "Note Heads"
 NOTE_HEADS_PARENT_NAME = "Note Heads Parent"
 NOTE_HEADS_SCALE = 100.0
