@@ -34,3 +34,11 @@
    intentionally fail (missing landings and ordering issues).
    Preserve the pre-180s success while iterating on fixes for the later
    section, and keep those diagnostic tests intact.
+
+7. The final two chords in the sheet music (notes D2, A2, F#3, D4, F#4, A4, D5)
+   are tied together. There is no second set of `noteOn` events for this tied
+   repeat before the music moves back to the preceding C#4, A4, C#5 chords.
+   Keep this in mind when building or debugging the curve generator: the SVG
+   still has two identical clusters of note heads, but the MIDI data only has
+   one onset, so any algorithm must account for those missing `noteOn` events
+   to land every note in that section.

@@ -70,7 +70,7 @@ import json
 import sys
 import os
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from xml.etree import ElementTree as ET
 
 # ============================================================================
@@ -462,42 +462,78 @@ def assign_svg_coords_to_notes(data, svg_centers):
         midi_chord_groups.append((time, group_sorted))
 
     # Group SVG centers by X position to identify SVG chords
-    svg_chord_groups = group_by_x_tolerance(svg_centers, lambda c: c[0], tolerance=15.0)
+    raw_svg_groups = group_by_x_tolerance(svg_centers, lambda c: c[0], tolerance=15.0)
+
     # Within each SVG chord, sort by ascending Y (top to bottom = high to low pitch)
-    for i, group in enumerate(svg_chord_groups):
-        svg_chord_groups[i] = sorted(group, key=lambda c: c[1])
+    svg_chord_queue = deque()
+    for group in raw_svg_groups:
+        sorted_group = sorted(group, key=lambda c: c[1])
+        avg_x = sum(pt[0] for pt in sorted_group) / len(sorted_group)
+        svg_chord_queue.append({'avg_x': avg_x, 'notes': sorted_group})
 
     print(f"  MIDI chord groups: {len(midi_chord_groups)}")
-    print(f"  SVG chord groups: {len(svg_chord_groups)}")
+    print(f"  SVG chord groups: {len(raw_svg_groups)}")
+    if len(midi_chord_groups) != len(raw_svg_groups):
+        print("  WARNING: Chord group count mismatch detected. Using adaptive matching...")
 
-    if len(midi_chord_groups) != len(svg_chord_groups):
-        print(f"  WARNING: Chord group count mismatch!")
-        print(f"    Will match as many chord groups as possible...")
-
-    # Match chord groups 1-to-1
+    MERGE_X_THRESHOLD = 45.0  # Max gap (in SVG units) to merge adjacent notehead groups
     matched = 0
     total_chord_mismatches = 0
-    for i, (midi_time, midi_notes) in enumerate(midi_chord_groups):
-        if i >= len(svg_chord_groups):
-            print(f"  WARNING: Ran out of SVG chord groups at MIDI chord {i} (time={midi_time:.3f})")
+
+    for midi_time, midi_notes in midi_chord_groups:
+        target_count = len(midi_notes)
+        if not svg_chord_queue:
+            print(f"  WARNING: Ran out of SVG chord groups at time={midi_time:.3f}. Stopping match.")
             break
 
-        svg_notes = svg_chord_groups[i]
+        combined_notes = []
+        temp_buffer = []  # Store groups we temporarily pop in case we need to push back
+        last_avg_x = None
 
-        # Within this chord, match notes 1-to-1 by pitch/Y order
-        if len(midi_notes) != len(svg_notes):
+        while svg_chord_queue and len(combined_notes) < target_count:
+            group = svg_chord_queue.popleft()
+            temp_buffer.append(group)
+
+            if last_avg_x is not None and (group['avg_x'] - last_avg_x) > MERGE_X_THRESHOLD and combined_notes:
+                # This group likely belongs to the next chord. Push it back and stop merging.
+                svg_chord_queue.appendleft(group)
+                temp_buffer.pop()  # Remove since we pushed it back
+                break
+
+            combined_notes.extend(group['notes'])
+            last_avg_x = group['avg_x']
+
+        if not combined_notes:
+            # Safety fallback - should not happen because we always take at least one group
+            for grp in reversed(temp_buffer):
+                svg_chord_queue.appendleft(grp)
+            print(f"  WARNING: Failed to gather SVG notes for chord at time={midi_time:.3f}")
+            continue
+
+        combined_notes.sort(key=lambda c: c[1])
+        assign_count = min(target_count, len(combined_notes))
+
+        if assign_count != target_count:
             total_chord_mismatches += 1
-            # Only print details for first few mismatches
             if total_chord_mismatches <= 3:
                 print(f"  WARNING: Chord size mismatch at time={midi_time:.3f}:")
-                print(f"    MIDI notes: {len(midi_notes)}, SVG notes: {len(svg_notes)}")
+                print(f"    MIDI notes: {target_count}, SVG notes: {len(combined_notes)}")
 
-        for j, note_event in enumerate(midi_notes):
-            if j < len(svg_notes):
-                svg_x, svg_y = svg_notes[j]
-                note_event['svgX'] = svg_x
-                note_event['svgY'] = svg_y
-                matched += 1
+        for j in range(assign_count):
+            note_event = midi_notes[j]
+            svg_x, svg_y = combined_notes[j]
+            note_event['svgX'] = svg_x
+            note_event['svgY'] = svg_y
+            matched += 1
+
+        # If there are leftover SVG notes (extra note heads), push them back to be used later
+        leftover = combined_notes[assign_count:]
+        if leftover:
+            avg_x = sum(pt[0] for pt in leftover) / len(leftover)
+            svg_chord_queue.appendleft({'avg_x': avg_x, 'notes': leftover})
+
+        # Remove any unused groups from temp_buffer (already consumed)
+        temp_buffer.clear()
 
     if total_chord_mismatches > 3:
         print(f"  ... and {total_chord_mismatches - 3} more chord size mismatches")
@@ -816,6 +852,78 @@ def build_curve_data(data, max_curves):
 
     missing_set = all_note_keys - notes_covered
     missing_notes = len(missing_set)
+
+    def can_assign_missing(curve_idx, info):
+        """Check whether a missed landing can be inserted into a curve."""
+        bY = info['bY']
+        t = info['time']
+
+        curve_landings = completed_curves.get(curve_names[curve_idx], [])
+
+        prev_landing = None
+        for landing in curve_landings:
+            if abs(landing[0] - t) < 1e-6:
+                return False  # landing already exists at this timestamp
+            if landing[0] < t:
+                prev_landing = landing
+            else:
+                break
+
+        if prev_landing is not None:
+            prev_key = (round(prev_landing[0], 5), prev_landing[1])
+            prev_end = note_lookup.get(prev_key, {}).get('end_t')
+            if prev_end is not None and prev_end - 0.05 > t:
+                return False  # curve is still sustaining a previous note
+
+        # Lower curves must stay <= this curve's Y
+        for lower_idx in range(curve_idx):
+            lower_curve = completed_curves.get(curve_names[lower_idx], [])
+            lower_bY = get_curve_bY_at_time(lower_curve, t)
+            if lower_bY is not None and bY < lower_bY - 0.001:
+                return False
+
+        # Higher curves must stay >= this curve's Y
+        for higher_idx in range(curve_idx + 1, len(curve_names)):
+            higher_curve = completed_curves.get(curve_names[higher_idx], [])
+            higher_bY = get_curve_bY_at_time(higher_curve, t)
+            if higher_bY is not None and bY > higher_bY + 0.001:
+                return False
+
+        return True
+
+    def insert_landing(curve_landings, info):
+        entry = (info['time'], info['note'], info['svgX'], info['svgY'], info['bY'], info['noteName'])
+        inserted = False
+        for idx, (landing_time, *_rest) in enumerate(curve_landings):
+            if landing_time > info['time']:
+                curve_landings.insert(idx, entry)
+                inserted = True
+                break
+        if not inserted:
+            curve_landings.append(entry)
+
+    def backfill_missing_notes(missing_keys):
+        inserted = 0
+        ordered_keys = sorted(missing_keys, key=lambda k: note_lookup.get(k, {}).get('time', 0.0))
+        for key in ordered_keys:
+            info = note_lookup.get(key)
+            if not info:
+                continue
+            for curve_idx in range(len(curve_names)):
+                if can_assign_missing(curve_idx, info):
+                    insert_landing(completed_curves.setdefault(curve_names[curve_idx], []), info)
+                    notes_covered.add(key)
+                    inserted += 1
+                    break
+        return inserted
+
+    if missing_notes > 0:
+        recovered = backfill_missing_notes(missing_set)
+        if recovered:
+            print(f"  INFO: Backfilled {recovered} missing notes via post-processing")
+        missing_set = all_note_keys - notes_covered
+        missing_notes = len(missing_set)
+
     if missing_notes > 0:
         coverage_percent = (len(notes_covered) / len(all_note_keys)) * 100 if all_note_keys else 0
         print(f"  WARNING: {missing_notes} matched notes not covered by any curve "
