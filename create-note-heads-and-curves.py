@@ -517,6 +517,30 @@ def create_parent_empty(collection, parent_name):
     return empty
 
 
+def align_fly_out_segment(points):
+    """Ensure fly-out points reuse the Y coordinate from the final landing."""
+    last_landing = None
+    for point in reversed(points):
+        if point.get('type') == 'landing':
+            last_landing = point
+            break
+
+    if not last_landing:
+        return
+
+    last_y = last_landing.get('y')
+    last_svg_y = last_landing.get('svgY')
+
+    for point in reversed(points):
+        if point.get('pointType') in ('fly_off_peak', 'fly_off_end') or point.get('type') == 'fly_off':
+            if last_y is not None:
+                point['y'] = last_y
+            if last_svg_y is not None:
+                point['svgY'] = last_svg_y
+        if point is last_landing:
+            break
+
+
 def create_bezier_curve(curve_name, curve_data, config, collection, parent_empty):
     """
     Create a single bezier curve from the curve data.
@@ -532,6 +556,7 @@ def create_bezier_curve(curve_name, curve_data, config, collection, parent_empty
         Dict with created objects
     """
     points = curve_data['points']
+    align_fly_out_segment(points)
 
     if len(points) < 2:
         print(f"  Skipping {curve_name}: not enough points")
