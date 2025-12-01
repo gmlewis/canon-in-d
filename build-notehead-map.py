@@ -27,6 +27,7 @@ X_GROUP_TOLERANCE = 15.0
 MERGE_X_THRESHOLD = 45.0
 TIE_TIME_GAP_MAX = 8.0  # seconds; generous to cover long sustains
 TIME_ALIGNMENT_TOL = 0.75  # max |head_time - midi_time| to consider alignment valid
+SVG_Y_MATCH_TOL = 4.0  # svgY tolerance (in SVG units) for tie matching when names are missing
 
 NOTE_BASE = {
     "C": 0,
@@ -333,21 +334,26 @@ def match_notes_to_heads(note_on_events: List[Dict], heads: List[NoteHead]) -> i
 
 def classify_unmatched_heads(heads: List[NoteHead]) -> None:
     playable_by_note: Dict[int, List[NoteHead]] = defaultdict(list)
-    for head in sorted(heads, key=lambda h: (h.note_on.get("time") if h.note_on else float("inf"))):
+    playable_by_svg_y: Dict[float, List[NoteHead]] = defaultdict(list)
+
+    sortable_heads = sorted(heads, key=lambda h: (h.note_on.get("time") if h.note_on else float("inf")))
+    for head in sortable_heads:
         if head.is_playable and head.midi_note is not None:
             playable_by_note[head.midi_note].append(head)
-
-    for head in heads:
         if head.is_playable:
-            continue
-        if "_extra_" in head.svg_id or head.initial_name is None:
-            head.is_extra = True
-            continue
-        if head.midi_note is None:
-            head.is_extra = True
-            continue
-        candidates = playable_by_note.get(head.midi_note, [])
-        chosen = None
+            key = round(head.svg_y, 3)
+            playable_by_svg_y[key].append(head)
+    playable_sorted_by_y = [h for h in sortable_heads if h.is_playable]
+
+    def pick_tie_source(head: NoteHead) -> Optional[NoteHead]:
+        candidates = []
+        if head.midi_note is not None:
+            candidates = playable_by_note.get(head.midi_note, [])
+        if not candidates:
+            key = round(head.svg_y, 3)
+            candidates = playable_by_svg_y.get(key, [])
+        if not candidates:
+            candidates = [p for p in playable_sorted_by_y if abs(p.svg_y - head.svg_y) <= SVG_Y_MATCH_TOL]
         for candidate in reversed(candidates):
             if head.approx_time is not None and candidate.note_on:
                 delta = head.approx_time - candidate.note_on.get("time", 0.0)
@@ -355,21 +361,29 @@ def classify_unmatched_heads(heads: List[NoteHead]) -> None:
                     continue
                 if delta > TIE_TIME_GAP_MAX:
                     continue
-            chosen = candidate
-            break
-        if chosen:
+            if head.svg_x < candidate.svg_x - 1e-3:
+                continue
+            return candidate
+        return None
+
+    for head in heads:
+        if head.is_playable:
+            continue
+        candidate = pick_tie_source(head)
+        if candidate:
             head.is_tie_only = True
-            head.tie_source_id = chosen.svg_id
-            head.tie_source_time = chosen.note_on.get("time") if chosen.note_on else None
+            head.is_extra = False
+            head.tie_source_id = candidate.svg_id
+            head.tie_source_time = candidate.note_on.get("time") if candidate.note_on else None
         else:
             head.is_extra = True
 
 
 def build_indexes(heads: List[NoteHead]) -> Dict[str, Dict[str, List[str]]]:
     by_note_on: Dict[str, List[str]] = defaultdict(list)
-    by_note_id: Dict[str, str] = {}
-    for head in heads:
-        by_note_id[head.svg_id] = head.svg_id
+    by_note_id: Dict[str, int] = {}
+    for idx, head in enumerate(heads):
+        by_note_id[head.svg_id] = idx
         if head.note_on:
             key = f"{head.note_on['time']:.6f}|{head.note_on.get('note', -1)}"
             by_note_on[key].append(head.svg_id)
