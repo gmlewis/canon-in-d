@@ -64,14 +64,14 @@ INVARIANT (in Blender coordinates):
   at ALL values of X (i.e., at all times)
 
 This ensures curves never visually cross each other in the X-Y plane.
+
 """
 
 import json
-import sys
 import os
 import re
+import sys
 from collections import defaultdict, deque
-from xml.etree import ElementTree as ET
 
 # ============================================================================
 # Configuration - These values are written to the output JSON for Blender
@@ -79,6 +79,7 @@ from xml.etree import ElementTree as ET
 INPUT_JSON_FILE = "CanonInD.json"
 OUTPUT_JSON_FILE = "note-jumping-curves.json"
 SVG_FILE = "Canon_in_D-single-svg-printing_NoteHeads.svg"
+NOTEHEAD_MAP_FILE = "notehead-map.json"
 
 # Blender scene configuration
 COLLECTION_NAME = "Note Jumping Curves"
@@ -89,227 +90,25 @@ MAX_JUMPING_CURVE_Z_OFFSET = 0.5  # Height of the arc peak between notes
 # Set this to match whatever scale you apply to the imported SVG in Blender
 USER_SCALE_FACTOR = 100.0  # You scale the SVG by 100x after import
 
-# These will be computed from SVG file
-SVG_SCALE = None       # Computed from SVG viewBox and width
+# These will be computed from SVG file / notehead map metadata
+SVG_SCALE = None       # Computed from notehead map metadata
 X_SCALE = None         # Same as SVG_SCALE (uniform scaling)
 Y_SCALE = None         # Same as SVG_SCALE (positive, for use in formula)
 VIEWBOX_HEIGHT = None  # Height of SVG viewBox (for Y flip calculation)
 
 
-# ============================================================================
-# COORDINATE TRANSFORMATION FUNCTIONS
-# ============================================================================
-# USE THESE FUNCTIONS! Do not manually work with SVG coordinates!
-# ============================================================================
-
 def svg_to_blender(svgX, svgY):
-    """
-    Transform SVG coordinates to Blender coordinates.
-
-    USE THIS FUNCTION for all coordinate transformations!
-
-    In Blender coordinates:
-    - X increases left to right (same as SVG)
-    - Y increases UPWARD (opposite of SVG) - higher Y = higher pitch
-
-    Returns: (blenderX, blenderY) tuple
-    """
+    """Transform SVG coordinates to Blender coordinates."""
     blenderX = svgX * X_SCALE
     blenderY = (VIEWBOX_HEIGHT - svgY) * Y_SCALE
-    return (blenderX, blenderY)
+    return blenderX, blenderY
 
 
 def blender_to_svg(blenderX, blenderY):
-    """
-    Transform Blender coordinates back to SVG coordinates.
-
-    Use this when writing output that needs SVG coordinates.
-
-    Returns: (svgX, svgY) tuple
-    """
+    """Transform Blender coordinates back to SVG coordinates."""
     svgX = blenderX / X_SCALE
     svgY = VIEWBOX_HEIGHT - (blenderY / Y_SCALE)
-    return (svgX, svgY)
-
-
-def parse_svg_dimensions(svg_file):
-    """
-    Parse the SVG file to extract viewBox and width/height.
-    Returns (viewbox_width, viewbox_height, width_mm, height_mm).
-
-    Blender's SVG importer calculates scale as:
-      scale = (width_in_mm / viewbox_width) / 1000  (to convert mm to meters)
-    """
-    try:
-        tree = ET.parse(svg_file)
-        root = tree.getroot()
-
-        # Get viewBox
-        viewbox = root.get('viewBox', '0 0 1000 1000')
-        viewbox_parts = viewbox.split()
-        viewbox_width = float(viewbox_parts[2])
-        viewbox_height = float(viewbox_parts[3])
-
-        # Get width - parse mm value
-        width_str = root.get('width', '1000mm')
-        width_match = re.match(r'([\d.]+)\s*mm', width_str)
-        if width_match:
-            width_mm = float(width_match.group(1))
-        else:
-            # Try parsing as plain number (assume mm)
-            width_mm = float(re.sub(r'[^\d.]', '', width_str))
-
-        # Get height - parse mm value
-        height_str = root.get('height', '1000mm')
-        height_match = re.match(r'([\d.]+)\s*mm', height_str)
-        if height_match:
-            height_mm = float(height_match.group(1))
-        else:
-            height_mm = float(re.sub(r'[^\d.]', '', height_str))
-
-        return viewbox_width, viewbox_height, width_mm, height_mm
-
-    except Exception as e:
-        print(f"ERROR: Failed to parse SVG file '{svg_file}': {e}", file=sys.stderr)
-        return None, None, None, None
-
-
-def compute_blender_scale(svg_file):
-    """
-    Compute the scale factor that Blender uses when importing an SVG.
-
-    Blender's formula: scale = (width_mm / viewbox_width) / 1000
-    This converts SVG units to meters.
-
-    Returns (scale, viewbox_width, viewbox_height) or None on error.
-    """
-    viewbox_width, viewbox_height, width_mm, height_mm = parse_svg_dimensions(svg_file)
-
-    if viewbox_width is None:
-        return None
-
-    # Blender's scale calculation
-    base_scale = (width_mm / viewbox_width) / 1000.0
-
-    # Apply user's additional scale factor
-    scale = base_scale * USER_SCALE_FACTOR
-
-    print(f"\nSVG Coordinate System:")
-    print(f"  viewBox: 0 0 {viewbox_width} {viewbox_height}")
-    print(f"  width: {width_mm}mm, height: {height_mm}mm")
-    print(f"  Blender base scale: {base_scale:.10f} m/unit")
-    if USER_SCALE_FACTOR != 1.0:
-        print(f"  User scale factor: {USER_SCALE_FACTOR}x")
-        print(f"  Final scale: {scale:.10f}")
-
-    return scale, viewbox_width, viewbox_height
-
-
-def group_by_x_tolerance(items, get_x, tolerance=15.0):
-    """
-    Group items by X position with tolerance.
-    Items within 'tolerance' X units of each other are considered the same chord.
-
-    Returns a list of groups, where each group is sorted by the average X of the group.
-    Within each group, items retain their original order.
-    """
-    if not items:
-        return []
-
-    # Sort by X first
-    sorted_items = sorted(items, key=get_x)
-
-    groups = []
-    current_group = [sorted_items[0]]
-    current_group_start_x = get_x(sorted_items[0])
-
-    for item in sorted_items[1:]:
-        item_x = get_x(item)
-        # Check if this item is within tolerance of the group's starting X
-        if item_x - current_group_start_x <= tolerance:
-            current_group.append(item)
-        else:
-            groups.append(current_group)
-            current_group = [item]
-            current_group_start_x = item_x
-
-    groups.append(current_group)
-    return groups
-
-
-def extract_svg_note_centers(svg_file):
-    """
-    Extract the center coordinates of all note head paths from the SVG file.
-
-    Returns a list of (x, y) tuples sorted for chord matching.
-    These coordinates are in SVG units and match what Blender imports.
-
-    Sorting strategy:
-    - Group paths by X position (within tolerance) to identify chords
-    - Sort groups by their minimum X (left to right)
-    - Within each chord group, sort by Y (top to bottom = ascending Y)
-
-    This matches notes sorted by (time, descending pitch within chord).
-
-    The note head paths are ellipses drawn with a 'm' (moveto) followed by 'c' (bezier).
-    The moveto point is at the left-center of the ellipse. We add half the ellipse
-    width (~17.35 units) to get the true center X.
-    """
-    try:
-        tree = ET.parse(svg_file)
-        root = tree.getroot()
-    except Exception as e:
-        print(f"ERROR: Failed to parse SVG file '{svg_file}': {e}", file=sys.stderr)
-        return None
-
-    centers = []
-
-    for elem in root.iter():
-        # Handle namespaced tags
-        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
-
-        if tag == 'path':
-            d = elem.get('d', '')
-            if not d:
-                continue
-
-            # Parse the moveto command to get the path start point
-            # Format: "m X,Y c ..." or "M X,Y c ..."
-            match = re.match(r'm\s+([-\d.]+),([-\d.]+)', d, re.IGNORECASE)
-            if not match:
-                continue
-
-            start_x = float(match.group(1))
-            start_y = float(match.group(2))
-
-            # The note head ellipse is approximately 34.7 units wide
-            # The path starts at the left edge, so add half-width to get center X
-            # The Y coordinate of the start point is already at the vertical center
-            NOTE_HEAD_HALF_WIDTH = 17.35
-            center_x = start_x + NOTE_HEAD_HALF_WIDTH
-            center_y = start_y
-
-            centers.append((center_x, center_y))
-
-    # Group paths by X position (within tolerance) to identify chords
-    # Tolerance of 15 units handles bass/treble alignment differences
-    chord_groups = group_by_x_tolerance(centers, lambda c: c[0], tolerance=15.0)
-
-    # Build final sorted list:
-    # - Groups sorted by minimum X (left to right)
-    # - Within each group, sorted by Y (ascending = top to bottom on page)
-    sorted_centers = []
-    for group in chord_groups:
-        # Sort within chord by Y (ascending Y = top to bottom = high pitch to low pitch)
-        group_sorted = sorted(group, key=lambda c: c[1])
-        sorted_centers.extend(group_sorted)
-
-    print(f"\nExtracted {len(sorted_centers)} note head centers from SVG")
-    if sorted_centers:
-        print(f"  First: ({sorted_centers[0][0]:.2f}, {sorted_centers[0][1]:.2f})")
-        print(f"  Last:  ({sorted_centers[-1][0]:.2f}, {sorted_centers[-1][1]:.2f})")
-
-    return sorted_centers
+    return svgX, svgY
 
 
 def svg_to_blender_x(svg_x):
@@ -342,6 +141,83 @@ def load_json_data(filepath):
     except json.JSONDecodeError as e:
         print(f"ERROR: Failed to parse JSON file '{filepath}': {e}", file=sys.stderr)
         return None
+
+
+def format_note_on_key(time_value, midi_note, precision=6):
+    """Create the canonical index key used by notehead-map.json."""
+    if time_value is None or midi_note is None:
+        return None
+    rounded_time = round(time_value + 1e-12, precision)
+    return f"{rounded_time:.{precision}f}|{int(midi_note)}"
+
+
+def load_notehead_map_data(filepath):
+    """Load the canonical notehead map JSON structure."""
+    data = load_json_data(filepath)
+    if data is None:
+        return None
+    if 'heads' not in data or 'metadata' not in data:
+        print(f"ERROR: Notehead map '{filepath}' is missing required sections.", file=sys.stderr)
+        return None
+    return data
+
+
+def build_notehead_lookup(notehead_map):
+    """Build a lookup of canonical heads keyed by (time|note)."""
+    heads = notehead_map.get('heads', [])
+    index = notehead_map.get('index', {})
+    by_note_on = index.get('byNoteOn', {})
+
+    id_lookup = {}
+    for idx, head in enumerate(heads):
+        head_id = head.get('svgId') or head.get('id')
+        if not head_id:
+            head_id = f"head_{idx}"
+            head['svgId'] = head_id
+        id_lookup[head_id] = head
+
+    lookup = {}
+    for key, id_list in by_note_on.items():
+        queue = deque()
+        for head_id in id_list:
+            head = id_lookup.get(head_id)
+            if head:
+                queue.append(head)
+        if queue:
+            lookup[key] = queue
+    return lookup
+
+
+def apply_notehead_map_to_events(data, lookup):
+    """Attach SVG coordinates to noteOn events using the canonical map."""
+    total = 0
+    matched = 0
+    missing = []
+
+    for track in data:
+        if not isinstance(track, list):
+            continue
+        for event in track:
+            if not isinstance(event, dict) or event.get('type') != 'noteOn':
+                continue
+            total += 1
+            key = format_note_on_key(event.get('time'), event.get('note'))
+            if key is None:
+                missing.append((event.get('time'), event.get('note')))
+                continue
+            bucket = lookup.get(key)
+            if not bucket:
+                missing.append((event.get('time'), event.get('note')))
+                continue
+            head = bucket.popleft()
+            event['svgX'] = head.get('svgX', 0.0)
+            event['svgY'] = head.get('svgY', 0.0)
+            event['svgId'] = head.get('svgId') or head.get('id')
+            if head.get('noteName'):
+                event['name'] = head['noteName']
+            matched += 1
+
+    return matched, total, missing
 
 
 def compute_max_concurrent_notes(data):
@@ -415,127 +291,6 @@ def collect_note_events(data):
     return events
 
 
-def assign_svg_coords_to_notes(data, svg_centers):
-    """
-    Assign SVG coordinates from the extracted SVG path centers to noteOn events.
-
-    This matches noteOn events with SVG path centers using CHORD-BY-CHORD matching:
-    1. Group MIDI notes by timestamp (chord groups)
-    2. Group SVG centers by X position (chord groups)
-    3. Match chord groups 1-to-1 in order (first MIDI chord → first SVG chord, etc.)
-    4. Within each matched chord pair, match by pitch/Y order:
-       - MIDI notes sorted by descending pitch (highest first)
-       - SVG centers sorted by ascending Y (top first = highest pitch)
-
-    This handles cases where SVG has extra notes (e.g., ornaments not in MIDI)
-    by ensuring each chord's notes are matched correctly regardless of global count.
-
-    Modifies the noteOn events in place, updating their 'svgX' and 'svgY' fields.
-    Returns the number of notes matched.
-    """
-    from collections import defaultdict
-
-    # Collect all noteOn events with their references
-    note_on_events = []
-    for track in data:
-        if not isinstance(track, list):
-            continue
-        for event in track:
-            if isinstance(event, dict) and event.get('type') == 'noteOn':
-                note_on_events.append(event)
-
-    # Group notes by timestamp to identify MIDI chords
-    time_groups = defaultdict(list)
-    for note in note_on_events:
-        time_groups[note.get('time', 0)].append(note)
-
-    # Build list of MIDI chord groups (sorted by time)
-    # Each chord group contains notes sorted by descending pitch (highest first)
-    midi_chord_groups = []
-    for time in sorted(time_groups.keys()):
-        group = time_groups[time]
-        group_sorted = sorted(group, key=lambda n: -n.get('note', 0))  # Descending pitch
-        midi_chord_groups.append((time, group_sorted))
-
-    # Group SVG centers by X position to identify SVG chords
-    raw_svg_groups = group_by_x_tolerance(svg_centers, lambda c: c[0], tolerance=15.0)
-
-    # Within each SVG chord, sort by ascending Y (top to bottom = high to low pitch)
-    svg_chord_queue = deque()
-    for group in raw_svg_groups:
-        sorted_group = sorted(group, key=lambda c: c[1])
-        avg_x = sum(pt[0] for pt in sorted_group) / len(sorted_group)
-        svg_chord_queue.append({'avg_x': avg_x, 'notes': sorted_group})
-
-    print(f"  MIDI chord groups: {len(midi_chord_groups)}")
-    print(f"  SVG chord groups: {len(raw_svg_groups)}")
-    if len(midi_chord_groups) != len(raw_svg_groups):
-        print("  WARNING: Chord group count mismatch detected. Using adaptive matching...")
-
-    MERGE_X_THRESHOLD = 45.0  # Max gap (in SVG units) to merge adjacent notehead groups
-    matched = 0
-    total_chord_mismatches = 0
-
-    for midi_time, midi_notes in midi_chord_groups:
-        target_count = len(midi_notes)
-        if not svg_chord_queue:
-            print(f"  WARNING: Ran out of SVG chord groups at time={midi_time:.3f}. Stopping match.")
-            break
-
-        combined_notes = []
-        temp_buffer = []  # Store groups we temporarily pop in case we need to push back
-        last_avg_x = None
-
-        while svg_chord_queue and len(combined_notes) < target_count:
-            group = svg_chord_queue.popleft()
-            temp_buffer.append(group)
-
-            if last_avg_x is not None and (group['avg_x'] - last_avg_x) > MERGE_X_THRESHOLD and combined_notes:
-                # This group likely belongs to the next chord. Push it back and stop merging.
-                svg_chord_queue.appendleft(group)
-                temp_buffer.pop()  # Remove since we pushed it back
-                break
-
-            combined_notes.extend(group['notes'])
-            last_avg_x = group['avg_x']
-
-        if not combined_notes:
-            # Safety fallback - should not happen because we always take at least one group
-            for grp in reversed(temp_buffer):
-                svg_chord_queue.appendleft(grp)
-            print(f"  WARNING: Failed to gather SVG notes for chord at time={midi_time:.3f}")
-            continue
-
-        combined_notes.sort(key=lambda c: c[1])
-        assign_count = min(target_count, len(combined_notes))
-
-        if assign_count != target_count:
-            total_chord_mismatches += 1
-            if total_chord_mismatches <= 3:
-                print(f"  WARNING: Chord size mismatch at time={midi_time:.3f}:")
-                print(f"    MIDI notes: {target_count}, SVG notes: {len(combined_notes)}")
-
-        for j in range(assign_count):
-            note_event = midi_notes[j]
-            svg_x, svg_y = combined_notes[j]
-            note_event['svgX'] = svg_x
-            note_event['svgY'] = svg_y
-            matched += 1
-
-        # If there are leftover SVG notes (extra note heads), push them back to be used later
-        leftover = combined_notes[assign_count:]
-        if leftover:
-            avg_x = sum(pt[0] for pt in leftover) / len(leftover)
-            svg_chord_queue.appendleft({'avg_x': avg_x, 'notes': leftover})
-
-        # Remove any unused groups from temp_buffer (already consumed)
-        temp_buffer.clear()
-
-    if total_chord_mismatches > 3:
-        print(f"  ... and {total_chord_mismatches - 3} more chord size mismatches")
-
-    print(f"  Matched {matched} noteOn events to SVG coordinates")
-    return matched
 
 
 def build_curve_data(data, max_curves):
@@ -872,13 +627,16 @@ def build_curve_data(data, max_curves):
         {'curve': 'curve7', 'note': 74, 'time': 241.86084530498826},  # D5
     ]
 
-    def resolve_final_chord_entries():
+    def resolve_chord_entries(requirements, chord_label):
         entries = []
-        for requirement in FINAL_CHORD_REQUIREMENTS:
+        for requirement in requirements:
             note_key = (round(requirement['time'], 5), requirement['note'])
             info = note_lookup.get(note_key)
             if not info:
-                print(f"  WARNING: Missing note info for final chord note={requirement['note']} time={requirement['time']:.5f}")
+                print(
+                    f"  WARNING: Missing note info for {chord_label} note={requirement['note']} "
+                    f"time={requirement['time']:.5f}"
+                )
                 continue
 
             entries.append({
@@ -899,10 +657,9 @@ def build_curve_data(data, max_curves):
                 landing for landing in landings if landing[0] < FINAL_TIME_THRESHOLD
             ]
 
-        for entry in resolve_final_chord_entries():
+        for entry in resolve_chord_entries(FINAL_CHORD_REQUIREMENTS, "final chord"):
             insert_landing(completed_curves.setdefault(entry['curve'], []), entry)
             print(f"  INFO: Final chord assigned {entry['noteName']} to {entry['curve']}")
-
     apply_final_chord_layout()
 
     # Rebuild coverage to reflect the enforced chord
@@ -1134,10 +891,27 @@ def generate_bezier_points(curves, z_offset):
             bezier_points.append(landing)
             last_added_landing = point  # Track for next iteration
 
-        # Get the last landing point info for the fly-off
-        last_landing = landing_points[-1]
-        last_x = svg_to_blender_x(last_landing['svgX'])
-        last_y = svg_to_blender_y(last_landing['svgY'])
+        # Use the FINAL landing we just emitted to anchor the fly-out segment.
+        last_landing_point = None
+        for candidate in reversed(bezier_points):
+            if candidate.get('type') == 'landing':
+                last_landing_point = candidate
+                break
+
+        if last_landing_point is None:
+            bezier_curves[curve_name] = {
+                'landingCount': len(landing_points),
+                'bezierPointCount': len(bezier_points),
+                'points': bezier_points
+            }
+            continue
+
+        last_x = last_landing_point['x']
+        last_y = last_landing_point['y']
+        last_svg_x = last_landing_point['svgX']
+        last_svg_y = last_landing_point['svgY']
+        last_note_name = last_landing_point.get('noteName', '')
+        last_timestamp = last_landing_point.get('timestamp', 0.0)
 
         # Add arc peak between last landing and fly-off
         fly_off_peak = {
@@ -1145,12 +919,12 @@ def generate_bezier_points(curves, z_offset):
             'y': last_y,
             'z': z_offset,
             'type': 'peak',
-            'noteName': f"{last_landing['noteName']} -> fly-off peak",
+            'noteName': f"{last_note_name} -> fly-off peak",
             'note': None,
-            'timestamp': last_landing['timestamp'] + 0.5,
+            'timestamp': last_timestamp + 0.5,
             'pointType': 'fly_off_peak',
-            'svgX': last_landing['svgX'] + (FLY_OFFSET / 2.0 / X_SCALE),
-            'svgY': last_landing['svgY']
+            'svgX': last_svg_x + (FLY_OFFSET / 2.0 / X_SCALE),
+            'svgY': last_svg_y
         }
         bezier_points.append(fly_off_peak)
 
@@ -1160,12 +934,12 @@ def generate_bezier_points(curves, z_offset):
             'y': last_y,
             'z': z_offset,  # Hovering, not on the ground
             'type': 'fly_off',
-            'noteName': f"{last_landing['noteName']} -> fly-off",
+            'noteName': f"{last_note_name} -> fly-off",
             'note': None,
-            'timestamp': last_landing['timestamp'] + 1.0,
+            'timestamp': last_timestamp + 1.0,
             'pointType': 'fly_off_end',
-            'svgX': last_landing['svgX'] + 500,  # Way off-screen in SVG coords
-            'svgY': last_landing['svgY']
+            'svgX': last_svg_x + 500,  # Way off-screen in SVG coords
+            'svgY': last_svg_y
         }
         bezier_points.append(fly_off_end)
 
@@ -1185,29 +959,43 @@ def main():
     print("Note Jumping Curves Generator (Standalone)")
     print("=" * 70)
 
-    # Step 0: Compute scale from SVG file and extract note head positions
-    print(f"\nReading SVG file '{SVG_FILE}'...")
-    result = compute_blender_scale(SVG_FILE)
-    if result is None:
-        print("ERROR: Could not parse SVG file. Aborting.")
+    # Step 0: Load canonical note head mapping for scale + coordinates
+    print(f"\nLoading note head map '{NOTEHEAD_MAP_FILE}'...")
+    notehead_map = load_notehead_map_data(NOTEHEAD_MAP_FILE)
+    if notehead_map is None:
+        print("Aborting due to note head map load failure.")
         return 1
 
-    scale, viewbox_width, viewbox_height = result
-    X_SCALE = scale
-    Y_SCALE = scale  # Same scale, but Y formula uses (viewbox_height - svg_y)
-    VIEWBOX_HEIGHT = viewbox_height
-    SVG_SCALE = scale  # Store for reference
+    metadata = notehead_map.get('metadata', {})
+    scale = metadata.get('svgScale')
+    viewbox_height = metadata.get('viewboxHeight')
+    if scale is None or viewbox_height is None:
+        print("ERROR: Note head map is missing scale metadata. Aborting.")
+        return 1
 
+    X_SCALE = scale
+    Y_SCALE = scale
+    VIEWBOX_HEIGHT = viewbox_height
+    SVG_SCALE = scale
+
+    source_svg = metadata.get('sourceSvg', SVG_FILE)
+    total_heads = metadata.get('totalHeads', 'unknown')
+    playable_heads = metadata.get('playableHeads', 'unknown')
+    tie_only_heads = metadata.get('tieOnlyHeads', 'unknown')
+    extra_heads = metadata.get('extraHeads', 'unknown')
+
+    print(f"  Source SVG: {source_svg}")
     print(f"  Scale = {scale:.10f}")
     print(f"  viewBox height = {viewbox_height} (for Y flip)")
-    print(f"  Formula: blender_x = svg_x * scale")
-    print(f"  Formula: blender_y = (viewbox_height - svg_y) * scale")
+    print(f"  Heads: total={total_heads}, playable={playable_heads}, tie-only={tie_only_heads}, extras={extra_heads}")
 
-    # Extract note head centers from SVG
-    svg_centers = extract_svg_note_centers(SVG_FILE)
-    if svg_centers is None or len(svg_centers) == 0:
-        print("ERROR: Could not extract note positions from SVG. Aborting.")
+    lookup = build_notehead_lookup(notehead_map)
+    if not lookup:
+        print("ERROR: Built empty lookup from note head map. Aborting.")
         return 1
+
+    indexed_count = sum(len(queue) for queue in lookup.values())
+    print(f"  Indexed {indexed_count} playable note heads from canonical map")
 
     # Step 1: Load JSON data
     print(f"\nLoading '{INPUT_JSON_FILE}'...")
@@ -1219,9 +1007,15 @@ def main():
 
     print(f"Successfully loaded JSON with {len(data)} tracks.")
 
-    # Step 1b: Assign SVG coordinates to noteOn events
-    print("\nMatching notes to SVG positions...")
-    assign_svg_coords_to_notes(data, svg_centers)
+    # Step 1b: Assign SVG coordinates using canonical mapping
+    print("\nApplying canonical note head mapping...")
+    matched_count, total_events, missing_events = apply_notehead_map_to_events(data, lookup)
+    print(f"  Matched {matched_count} noteOn events out of {total_events}")
+    if missing_events:
+        print(f"  WARNING: {len(missing_events)} noteOn events did not resolve to SVG heads")
+        for time, note in missing_events[:5]:
+            print(f"    Missing note {note} at t={time:.6f}s")
+        print("  HINT: Regenerate notehead-map.json if MIDI data changed.")
 
     # Step 2: Compute MAX_CURVES
     print("\nAnalyzing note overlaps...")
@@ -1264,7 +1058,9 @@ def main():
             'scale': SVG_SCALE,
             'viewboxHeight': VIEWBOX_HEIGHT,
             'userScaleFactor': USER_SCALE_FACTOR,
-            'svgFile': SVG_FILE,
+            'svgFile': source_svg,
+            'noteheadMap': NOTEHEAD_MAP_FILE,
+            'noteheadMapGeneratedAt': metadata.get('generatedAt'),
             'curveResolution': 12,
             'handleType': 'AUTO',
             '_formulaX': 'blender_x = svg_x * scale',
