@@ -89,10 +89,6 @@ MAX_JUMPING_CURVE_Z_OFFSET = 0.5  # Height of the arc peak between notes
 # Set this to match whatever scale you apply to the imported SVG in Blender
 USER_SCALE_FACTOR = 100.0  # You scale the SVG by 100x after import
 
-# How much to offset the final X position (for the "fly off" at end of song)
-# This is in SVG units, will be scaled by the computed scale factor
-END_X_OFFSET = 500
-
 # These will be computed from SVG file
 SVG_SCALE = None       # Computed from SVG viewBox and width
 X_SCALE = None         # Same as SVG_SCALE (uniform scaling)
@@ -864,43 +860,47 @@ def build_curve_data(data, max_curves):
         if not inserted:
             curve_landings.append(entry)
 
-    FINAL_TIME_THRESHOLD = 241.75
+    FINAL_TIME_THRESHOLD = 241.7
 
-    FINAL_CHORD_LAYOUT = [
-        {'curve': 'curve1', 'note': 38, 'noteName': 'D2', 'time': 241.79834580873745,
-         'svgX': 142645.89, 'svgY': 1014.8686},
-        {'curve': 'curve2', 'note': 45, 'noteName': 'A2', 'time': 241.79834580873745,
-         'svgX': 142234.79, 'svgY': 894.98853},
-        {'curve': 'curve3', 'note': 54, 'noteName': 'F#3', 'time': 241.79834580873745,
-         'svgX': 142645.89, 'svgY': 948.26853},
-        {'curve': 'curve4', 'note': 62, 'noteName': 'D4', 'time': 241.79834580873745,
-         'svgX': 142234.79, 'svgY': 681.86854},
-        {'curve': 'curve5', 'note': 66, 'noteName': 'F#4', 'time': 241.81834497553882,
-         'svgX': 142645.89, 'svgY': 735.14854},
-        {'curve': 'curve6', 'note': 69, 'noteName': 'A4', 'time': 241.8408461381869,
-         'svgX': 142645.89, 'svgY': 708.50854},
-        {'curve': 'curve7', 'note': 74, 'noteName': 'D5', 'time': 241.86084530498826,
-         'svgX': 142645.89, 'svgY': 668.54854}
+    FINAL_CHORD_REQUIREMENTS = [
+        {'curve': 'curve1', 'note': 38, 'time': 241.79834580873745},  # D2
+        {'curve': 'curve2', 'note': 45, 'time': 241.79834580873745},  # A2
+        {'curve': 'curve3', 'note': 54, 'time': 241.79834580873745},  # F#3
+        {'curve': 'curve4', 'note': 62, 'time': 241.79834580873745},  # D4
+        {'curve': 'curve5', 'note': 66, 'time': 241.81834497553882},  # F#4
+        {'curve': 'curve6', 'note': 69, 'time': 241.8408461381869},   # A4
+        {'curve': 'curve7', 'note': 74, 'time': 241.86084530498826},  # D5
     ]
+
+    def resolve_final_chord_entries():
+        entries = []
+        for requirement in FINAL_CHORD_REQUIREMENTS:
+            note_key = (round(requirement['time'], 5), requirement['note'])
+            info = note_lookup.get(note_key)
+            if not info:
+                print(f"  WARNING: Missing note info for final chord note={requirement['note']} time={requirement['time']:.5f}")
+                continue
+
+            entries.append({
+                'curve': requirement['curve'],
+                'time': info['time'],
+                'note': info['note'],
+                'noteName': info['noteName'],
+                'svgX': info['svgX'],
+                'svgY': info['svgY'],
+                'bY': info['bY']
+            })
+        return entries
 
     def apply_final_chord_layout():
         for curve_name in curve_names:
             landings = completed_curves.get(curve_name, [])
-            completed_curves[curve_name] = [landing for landing in landings if landing[0] < FINAL_TIME_THRESHOLD]
+            completed_curves[curve_name] = [
+                landing for landing in landings if landing[0] < FINAL_TIME_THRESHOLD
+            ]
 
-        for entry in FINAL_CHORD_LAYOUT:
-            svgX = entry['svgX']
-            svgY = entry['svgY']
-            _, bY = svg_to_blender(svgX, svgY)
-            info = {
-                'time': entry['time'],
-                'note': entry['note'],
-                'svgX': svgX,
-                'svgY': svgY,
-                'bY': bY,
-                'noteName': entry['noteName']
-            }
-            insert_landing(completed_curves.setdefault(entry['curve'], []), info)
+        for entry in resolve_final_chord_entries():
+            insert_landing(completed_curves.setdefault(entry['curve'], []), entry)
             print(f"  INFO: Final chord assigned {entry['noteName']} to {entry['curve']}")
 
     apply_final_chord_layout()
@@ -1021,20 +1021,6 @@ def build_curve_data(data, max_curves):
                     'pointType': 'landing'
                 }
                 points.append(point)
-
-        # Add end point (fly-off)
-        if points:
-            last_point = points[-1]
-            end_point = {
-                'noteName': last_point['noteName'],
-                'note': last_point['note'],
-                'svgX': last_point['svgX'] + END_X_OFFSET,
-                'svgY': last_point['svgY'],
-                'bY': last_point['bY'],
-                'timestamp': end_time,
-                'pointType': 'end'
-            }
-            points.append(end_point)
 
         curves[cn] = points
 
