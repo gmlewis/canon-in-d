@@ -43,21 +43,6 @@ def collect_bounce_segments(points, use_cyclic_u: bool):
     return segments
 
 
-def scale_midpoints(curve_obj):
-    for spline in curve_obj.data.splines:
-        control_points = get_control_points(spline)
-        segments = collect_bounce_segments(control_points, spline.use_cyclic_u)
-        if not segments:
-            continue
-
-        max_distance = max(segment["distance"] for segment in segments)
-        if max_distance <= EPSILON:
-            continue
-
-        for segment in segments:
-            ratio = segment["distance"] / max_distance
-            control_points[segment["mid_idx"]].co.z = MAX_Z_HEIGHT * ratio
-
 
 def main():
     selected_curves = [obj for obj in bpy.context.selected_objects if obj.type == "CURVE"]
@@ -65,8 +50,32 @@ def main():
         print("No selected curve objects found.")
         return
 
+    segments = []
     for curve_obj in selected_curves:
-        scale_midpoints(curve_obj)
+        for spline in curve_obj.data.splines:
+            control_points = get_control_points(spline)
+            spline_segments = collect_bounce_segments(control_points, spline.use_cyclic_u)
+            for segment in spline_segments:
+                segments.append(
+                    {
+                        "control_points": control_points,
+                        "mid_idx": segment["mid_idx"],
+                        "distance": segment["distance"],
+                    }
+                )
+
+    if not segments:
+        print("No bounce segments found on selected curves.")
+        return
+
+    global_max = max(segment["distance"] for segment in segments)
+    if global_max <= EPSILON:
+        print("Maximum bounce distance is zero; nothing to scale.")
+        return
+
+    for segment in segments:
+        ratio = segment["distance"] / global_max
+        segment["control_points"][segment["mid_idx"]].co.z = MAX_Z_HEIGHT * ratio
 
 
 if __name__ == "__main__":
