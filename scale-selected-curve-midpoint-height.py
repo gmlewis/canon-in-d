@@ -38,7 +38,14 @@ def collect_bounce_segments(points, use_cyclic_u: bool):
             and mid_pt.co.z > GROUND_Z + EPSILON
         ):
             distance = (end_pt.co - start_pt.co).length
-            segments.append({"mid_idx": mid_idx, "distance": distance})
+            segments.append(
+                {
+                    "mid_idx": mid_idx,
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "distance": distance,
+                }
+            )
 
     return segments
 
@@ -60,6 +67,8 @@ def main():
                     {
                         "control_points": control_points,
                         "mid_idx": segment["mid_idx"],
+                        "start_idx": segment["start_idx"],
+                        "end_idx": segment["end_idx"],
                         "distance": segment["distance"],
                     }
                 )
@@ -75,7 +84,15 @@ def main():
 
     for segment in segments:
         ratio = segment["distance"] / global_max
-        segment["control_points"][segment["mid_idx"]].co.z = MAX_Z_HEIGHT * ratio
+        control_points = segment["control_points"]
+        control_points[segment["mid_idx"]].co.z = MAX_Z_HEIGHT * ratio
+        ground_height = MAX_Z_HEIGHT * ratio
+        start_point = control_points[segment["start_idx"]]
+        end_point = control_points[segment["end_idx"]]
+        if hasattr(start_point, "handle_right"):
+            start_point.handle_right.z = start_point.co.z + ground_height
+        if hasattr(end_point, "handle_left"):
+            end_point.handle_left.z = end_point.co.z + ground_height
 
 
 if __name__ == "__main__":
