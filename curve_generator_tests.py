@@ -907,6 +907,10 @@ class TestTiedChordLandings(unittest.TestCase):
     PRE_TIE_WINDOW = 0.05
     TIE_DUPLICATE_WINDOW = (241.7, 242.05)
     TIE_NOTES = {"C#4", "A4", "C#5"}
+    FINAL_CHORD_TIME = 241.80
+    FINAL_TIME_WINDOW = 0.07
+    FINAL_NOTES = {"D2", "A2", "F#3", "D4", "F#4", "A4", "D5"}
+    EXTRA_MIN_SVGX = 143000.0
 
     @classmethod
     def setUpClass(cls):
@@ -947,6 +951,31 @@ class TestTiedChordLandings(unittest.TestCase):
         self.assertEqual([], violations,
                          "Found landings on tied duplicate note heads: "
                          f"{[(round(t, 3), n) for t, n in violations]}")
+
+    def test_final_chord_landings_exist(self):
+        """Ensure all notes of the final chord have landings."""
+        hits = {note: False for note in self.FINAL_NOTES}
+        for pt in self.landings:
+            if abs(pt['timestamp'] - self.FINAL_CHORD_TIME) <= self.FINAL_TIME_WINDOW:
+                note_name = pt.get('noteName', '')
+                if note_name in hits:
+                    hits[note_name] = True
+
+        missing = [note for note, hit in hits.items() if not hit]
+        self.assertEqual([], missing,
+                         f"Missing landings for final chord notes near {self.FINAL_CHORD_TIME:.3f}s: {missing}")
+
+    def test_final_tied_duplicates_absent(self):
+        """Ensure the far-right extra note heads never receive a landing."""
+        offenders = []
+        for pt in self.landings:
+            svg_x = pt.get('svgX', 0)
+            if svg_x >= self.EXTRA_MIN_SVGX:
+                offenders.append((pt['timestamp'], pt.get('noteName', ''), svg_x))
+
+        self.assertEqual([], offenders,
+                         "Found landings targeting extra note heads: "
+                         f"{[(round(t, 3), name, round(x, 1)) for t, name, x in offenders]}")
 
 
 def run_tests():
