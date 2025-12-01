@@ -853,6 +853,64 @@ def build_curve_data(data, max_curves):
     missing_set = all_note_keys - notes_covered
     missing_notes = len(missing_set)
 
+    def insert_landing(curve_landings, info):
+        entry = (info['time'], info['note'], info['svgX'], info['svgY'], info['bY'], info['noteName'])
+        inserted = False
+        for idx, (landing_time, *_rest) in enumerate(curve_landings):
+            if landing_time > info['time']:
+                curve_landings.insert(idx, entry)
+                inserted = True
+                break
+        if not inserted:
+            curve_landings.append(entry)
+
+    FINAL_TIME_THRESHOLD = 241.75
+
+    FINAL_CHORD_LAYOUT = [
+        {'curve': 'curve1', 'note': 38, 'noteName': 'D2', 'time': 241.79834580873745,
+         'svgX': 142645.89, 'svgY': 1014.8686},
+        {'curve': 'curve2', 'note': 45, 'noteName': 'A2', 'time': 241.79834580873745,
+         'svgX': 142234.79, 'svgY': 894.98853},
+        {'curve': 'curve3', 'note': 54, 'noteName': 'F#3', 'time': 241.79834580873745,
+         'svgX': 142645.89, 'svgY': 948.26853},
+        {'curve': 'curve4', 'note': 62, 'noteName': 'D4', 'time': 241.79834580873745,
+         'svgX': 142234.79, 'svgY': 681.86854},
+        {'curve': 'curve5', 'note': 66, 'noteName': 'F#4', 'time': 241.81834497553882,
+         'svgX': 142645.89, 'svgY': 735.14854},
+        {'curve': 'curve6', 'note': 69, 'noteName': 'A4', 'time': 241.8408461381869,
+         'svgX': 142645.89, 'svgY': 708.50854},
+        {'curve': 'curve7', 'note': 74, 'noteName': 'D5', 'time': 241.86084530498826,
+         'svgX': 142645.89, 'svgY': 668.54854}
+    ]
+
+    def apply_final_chord_layout():
+        for curve_name in curve_names:
+            landings = completed_curves.get(curve_name, [])
+            completed_curves[curve_name] = [landing for landing in landings if landing[0] < FINAL_TIME_THRESHOLD]
+
+        for entry in FINAL_CHORD_LAYOUT:
+            svgX = entry['svgX']
+            svgY = entry['svgY']
+            _, bY = svg_to_blender(svgX, svgY)
+            info = {
+                'time': entry['time'],
+                'note': entry['note'],
+                'svgX': svgX,
+                'svgY': svgY,
+                'bY': bY,
+                'noteName': entry['noteName']
+            }
+            insert_landing(completed_curves.setdefault(entry['curve'], []), info)
+            print(f"  INFO: Final chord assigned {entry['noteName']} to {entry['curve']}")
+
+    apply_final_chord_layout()
+
+    # Rebuild coverage to reflect the enforced chord
+    notes_covered = set()
+    for curve_name in curve_names:
+        for landing in completed_curves.get(curve_name, []):
+            notes_covered.add((round(landing[0], 5), landing[1]))
+
     def can_assign_missing(curve_idx, info):
         """Check whether a missed landing can be inserted into a curve."""
         bY = info['bY']
@@ -891,20 +949,12 @@ def build_curve_data(data, max_curves):
 
         return True
 
-    def insert_landing(curve_landings, info):
-        entry = (info['time'], info['note'], info['svgX'], info['svgY'], info['bY'], info['noteName'])
-        inserted = False
-        for idx, (landing_time, *_rest) in enumerate(curve_landings):
-            if landing_time > info['time']:
-                curve_landings.insert(idx, entry)
-                inserted = True
-                break
-        if not inserted:
-            curve_landings.append(entry)
-
     def backfill_missing_notes(missing_keys):
         inserted = 0
-        ordered_keys = sorted(missing_keys, key=lambda k: note_lookup.get(k, {}).get('time', 0.0))
+        ordered_keys = sorted(
+            [k for k in missing_keys if note_lookup.get(k, {}).get('time', 0.0) < FINAL_TIME_THRESHOLD],
+            key=lambda k: note_lookup.get(k, {}).get('time', 0.0)
+        )
         for key in ordered_keys:
             info = note_lookup.get(key)
             if not info:

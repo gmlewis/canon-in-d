@@ -42,3 +42,7 @@
    still has two identical clusters of note heads, but the MIDI data only has
    one onset, so any algorithm must account for those missing `noteOn` events
    to land every note in that section.
+
+8. Never modify these source-of-truth data files:
+   - CanonInD.json
+   - Canon_in_D-single-svg-printing_NoteHeads.svg
