@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Blender 5.0 script to synx the "Camera Controller" empty node from pre-generated data.
+Blender 5.0 script to sync the "Camera Controller" empty node from pre-generated data.
 Run this script from within Blender's scripting environment.
 
 This script:
-1. Reads the JSON output from build-notehead-map.py
-   and creates animation keyframes in Blender for the "Camera Controller".
+1. Reads the JSON data file and creates animation keyframes for the "Camera Controller".
 """
 
 import bpy
@@ -17,7 +16,7 @@ import os
 # Configuration
 # ============================================================================
 # Path to the JSON file (relative to the .blend file or absolute)
-NOTEHEAD_MAP_FILE = "notehead-map.json"
+JSON_FILE_PATH = "note-jumping-curves.json"
 
 GLOBAL_FPS = 60
 MUSIC_START_OFFSET_FRAMES = 120  # Frame at which music starts (2 seconds at 60 FPS)
@@ -36,13 +35,13 @@ def load_json_data(filepath):
         return None
 
 
-def load_notehead_map_data(filepath):
+def load_json_data_file(filepath):
     """Load the canonical notehead map JSON structure."""
     data = load_json_data(filepath)
     if data is None:
         return None
-    if 'heads' not in data or 'metadata' not in data:
-        print(f"ERROR: Notehead map '{filepath}' is missing required sections.", file=sys.stderr)
+    if 'curves' not in data:
+        print(f"ERROR: JSON file '{filepath}' is missing required sections.", file=sys.stderr)
         return None
     return data
 
@@ -52,12 +51,23 @@ def main():
     print("Sync Camera Controller (Blender Script)")
     print("=" * 70)
 
-    # Step 0: Load canonical note head mapping for scale + coordinates
-    print(f"\nLoading note head map '{NOTEHEAD_MAP_FILE}'...")
-    notehead_map = load_notehead_map_data(NOTEHEAD_MAP_FILE)
-    if notehead_map is None:
-        print("Aborting due to note head map load failure.")
+    print(f"\nLoading JSON data from '{JSON_FILE_PATH}'...")
+    json_data = load_json_data_file(JSON_FILE_PATH)
+    if json_data is None:
+        print("Aborting due to JSON load failure.")
         return 1
+
+    curve1_points = json_data.get('curves', {}).get('curve1', {}).get('points', [])
+    if not curve1_points:
+        print("No data found for 'curves.curve1.points' in JSON.")
+        return 1
+
+    curve1_landings = [pt for pt in curve1_points if pt.get('type') == 'landing']
+    if not curve1_landings:
+        print("No landing points found in 'curve1'.")
+        return 1
+
+    print(f"  Found {len(curve1_landings)} landings for curve1.")
 
 
 if __name__ == "__main__":
