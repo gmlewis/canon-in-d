@@ -69,6 +69,16 @@ def main():
 
     print(f"  Found {len(curve1_landings)} landings for curve1.")
 
+    scene = bpy.data.collections.get('Scene')
+    if scene is None:
+        print("ERROR: 'Scene' collection not found in Blender file.", file=sys.stderr)
+        return 1
+
+    camera_controller = scene.objects['Camera Controller']
+    if camera_controller is None:
+        print("ERROR: 'Camera Controller' object not found in Blender file.", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
     main()
