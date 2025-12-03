@@ -93,6 +93,28 @@ def compute_bounce_lengths(curve_obj) -> list[float]:
     return lengths
 
 
+def landing_timestamp(landing_point):
+    if isinstance(landing_point, dict):
+        return float(landing_point.get('timestamp', 0.0))
+    if isinstance(landing_point, (list, tuple)):
+        for element in landing_point:
+            if isinstance(element, dict) and 'timestamp' in element:
+                return float(element.get('timestamp', 0.0))
+        if landing_point and isinstance(landing_point[0], (int, float)):
+            return float(landing_point[0])
+    return 0.0
+
+
+def normalize_curve_point(point):
+    if isinstance(point, dict):
+        return point
+    if isinstance(point, (list, tuple)):
+        for candidate in point:
+            if isinstance(candidate, dict):
+                return candidate
+    return None
+
+
 def read_first_two_x_keyframes(obj):
     anim_data = obj.animation_data
     if anim_data is None or anim_data.action is None:
@@ -182,11 +204,16 @@ def main():
         trail_name = trail.name
         print(f"\nProcessing Energy Trail: '{trail_name}'")
         curve_name = trail_name.replace("Energy Trail ", "curve")
-        json_curve_points = json_data.get('curves', {}).get(curve_name, {}).get('points', [])
+        raw_curve_entry = json_data.get('curves', {}).get(curve_name, {})
+        json_curve_points = raw_curve_entry.get('points', [])
         if not json_curve_points:
             print(f"  No data found for '{curve_name}' in JSON.")
             return 1
-        json_curve_landings = [pt for pt in json_curve_points if pt.get('type') == 'landing']
+        json_curve_landings = []
+        for raw_point in json_curve_points:
+            normalized = normalize_curve_point(raw_point)
+            if normalized and normalized.get('type') == 'landing':
+                json_curve_landings.append(normalized)
         if not json_curve_landings:
             print(f"No landing points found in '{curve_name}' in JSON.")
             return 1
@@ -247,7 +274,7 @@ def main():
             next_landing = json_curve_landings[idx + 1]
             segment_length = bounce_lengths[idx]
             next_x = prev_x + segment_length
-            landing_frame = float(MUSIC_START_OFFSET_FRAMES) + float(next_landing.get('timestamp', 0.0)) * GLOBAL_FPS
+            landing_frame = float(MUSIC_START_OFFSET_FRAMES) + landing_timestamp(next_landing) * GLOBAL_FPS
             trail.location.x = next_x
             trail.keyframe_insert(data_path="location", index=0, frame=landing_frame)
             prev_x = next_x
