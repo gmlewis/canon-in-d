@@ -119,7 +119,10 @@ def read_first_two_x_keyframes(obj):
     anim_data = obj.animation_data
     if anim_data is None or anim_data.action is None:
         return None
-    for fcurve in anim_data.action.fcurves:
+    action = anim_data.action
+    if not hasattr(action, 'fcurves'):
+        return None
+    for fcurve in action.fcurves:
         if fcurve.data_path == 'location' and fcurve.array_index == 0:
             keypoints = sorted(fcurve.keyframe_points, key=lambda kp: kp.co.x)
             if len(keypoints) >= 2:
@@ -133,6 +136,8 @@ def clear_x_keyframes(obj):
     if anim_data is None or anim_data.action is None:
         return
     action = anim_data.action
+    if not hasattr(action, 'fcurves'):
+        return
     x_curves = [fc for fc in action.fcurves if fc.data_path == 'location' and fc.array_index == 0]
     for fcurve in x_curves:
         action.fcurves.remove(fcurve)
