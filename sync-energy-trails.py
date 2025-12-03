@@ -10,7 +10,7 @@ This script:
 import bpy
 import json
 import sys
-import os
+from mathutils.geometry import interpolate_bezier
 
 # ============================================================================
 # Configuration
@@ -22,6 +22,107 @@ GLOBAL_FPS = 60
 MUSIC_START_OFFSET_FRAMES = 120  # Frame at which music starts (2 seconds at 60 FPS)
 INITIAL_ENERGY_TRAIL_X_OFFSET = -5.0
 FIRST_LANDING_POINT_ENERGY_TRAIL_X_OFFSET_AT_T0 = 3.152
+FRAME_TOLERANCE = 1e-4
+GROUND_Z = 0.0
+EPSILON = 1e-6
+BEZIER_RESOLUTION = 24
+
+
+def is_ground(z_value: float) -> bool:
+    return abs(z_value - GROUND_Z) < EPSILON
+
+
+def get_control_points(spline):
+    return spline.bezier_points if spline.type == 'BEZIER' else spline.points
+
+
+def collect_bounce_segments(points, use_cyclic_u: bool) -> list[dict]:
+    segments = []
+    point_count = len(points)
+    if point_count < 3:
+        return segments
+
+    limit = point_count if use_cyclic_u else point_count - 2
+    for start_idx in range(limit):
+        mid_idx = (start_idx + 1) % point_count
+        end_idx = (start_idx + 2) % point_count
+        start_pt = points[start_idx]
+        mid_pt = points[mid_idx]
+        end_pt = points[end_idx]
+
+        if (
+            is_ground(start_pt.co.z)
+            and is_ground(end_pt.co.z)
+            and mid_pt.co.z > GROUND_Z + EPSILON
+        ):
+            segments.append({
+                'start_idx': start_idx,
+                'mid_idx': mid_idx,
+                'end_idx': end_idx,
+            })
+
+    return segments
+
+
+def evaluate_cubic_length(curve_obj, start_point, end_point, start_handle_attr, end_handle_attr, resolution):
+    matrix = curve_obj.matrix_world
+    start_co = matrix @ start_point.co
+    end_co = matrix @ end_point.co
+    start_handle = matrix @ getattr(start_point, start_handle_attr)
+    end_handle = matrix @ getattr(end_point, end_handle_attr)
+    samples = interpolate_bezier(start_co, start_handle, end_handle, end_co, resolution)
+    return sum((samples[i + 1] - samples[i]).length for i in range(len(samples) - 1))
+
+
+def compute_bounce_lengths(curve_obj) -> list[float]:
+    lengths = []
+    for spline in curve_obj.data.splines:
+        control_points = get_control_points(spline)
+        segments = collect_bounce_segments(control_points, spline.use_cyclic_u)
+        for seg in segments:
+            start_pt = control_points[seg['start_idx']]
+            mid_pt = control_points[seg['mid_idx']]
+            end_pt = control_points[seg['end_idx']]
+            half_a = evaluate_cubic_length(
+                curve_obj, start_pt, mid_pt, 'handle_right', 'handle_left', BEZIER_RESOLUTION
+            )
+            half_b = evaluate_cubic_length(
+                curve_obj, mid_pt, end_pt, 'handle_right', 'handle_left', BEZIER_RESOLUTION
+            )
+            lengths.append(half_a + half_b)
+    return lengths
+
+
+def read_first_two_x_keyframes(obj):
+    anim_data = obj.animation_data
+    if anim_data is None or anim_data.action is None:
+        return None
+    for fcurve in anim_data.action.fcurves:
+        if fcurve.data_path == 'location' and fcurve.array_index == 0:
+            keypoints = sorted(fcurve.keyframe_points, key=lambda kp: kp.co.x)
+            if len(keypoints) >= 2:
+                return keypoints[0], keypoints[1]
+            return None
+    return None
+
+
+def clear_x_keyframes(obj):
+    anim_data = obj.animation_data
+    if anim_data is None or anim_data.action is None:
+        return
+    action = anim_data.action
+    x_curves = [fc for fc in action.fcurves if fc.data_path == 'location' and fc.array_index == 0]
+    for fcurve in x_curves:
+        action.fcurves.remove(fcurve)
+
+
+def ensure_animation_data(obj):
+    if obj.animation_data is None:
+        obj.animation_data_create()
+    if obj.animation_data.action is None:
+        action = bpy.data.actions.new(name=f"{obj.name}_action")
+        obj.animation_data.action = action
+
 
 def load_json_data(filepath):
     """Load and parse JSON file. Returns None on failure."""
@@ -96,16 +197,60 @@ def main():
             print(f"ERROR: Blender curve object '{curve_name}_curve' not found.", file=sys.stderr)
             return 1
 
-        # TODO: Read the first two animation keyframes for the X location of the trail.
-        # * If the first keyframe is not at frame 1, warn and skip.
-        # * If the first keyframe's X location is set, print this value and use it instead of INITIAL_ENERGY_TRAIL_X_OFFSET.
-        # * If the second keyframe is not at frame MUSIC_START_OFFSET_FRAMES, warn and skip.
-        # * If the second keyframe's X location is set, print this value and use it instead of FIRST_LANDING_POINT_ENERGY_TRAIL_X_OFFSET_AT_T0.
-        # * Clear all keyframes on the trail's X location.
-        # * Create the first two keyframes with the determined X locations, one on frame 1 and one on MUSIC_START_OFFSET_FRAMES.
-        # * Note that frame MUSIC_START_OFFSET_FRAMES corresponds to time 0 in the JSON data and note that this also represents the first landing for each curve and should be the first landing position from the JSON data.
-        # * Now, for every pair of landings, first ask Blender to measure the physical length of the curve between the first and second landing points.
-        # * Using this length, add this length to the previous keyframe's X location to get the new X location for the second landing point and make an animation keyframe for this curve's energy trail at the appropriate frame based on the timestamp of the second landing point (using fractional floating-point frames for accuracy).
+        first_two = read_first_two_x_keyframes(trail)
+        if first_two is None:
+            print(f"  WARNING: Unable to find at least two X keyframes for '{trail_name}'. skipping.")
+            continue
+
+        first_kf, second_kf = first_two
+        if abs(first_kf.co.x - 1.0) > FRAME_TOLERANCE:
+            print(
+                f"  WARNING: First keyframe for '{trail_name}' is at frame {first_kf.co.x:.6f} (expected 1); skipping."
+            )
+            continue
+        if abs(second_kf.co.x - MUSIC_START_OFFSET_FRAMES) > FRAME_TOLERANCE:
+            print(
+                f"  WARNING: Second keyframe for '{trail_name}' is at frame {second_kf.co.x:.6f} "
+                f"(expected {MUSIC_START_OFFSET_FRAMES}); skipping."
+            )
+            continue
+
+        initial_x = first_kf.co.y
+        landing_x = second_kf.co.y
+        print(f"  Using initial trail X {initial_x:.6f} and first landing X {landing_x:.6f} for '{trail_name}'.")
+
+        clear_x_keyframes(trail)
+        ensure_animation_data(trail)
+
+        trail.location.x = initial_x
+        trail.keyframe_insert(data_path="location", index=0, frame=1.0)
+        trail.location.x = landing_x
+        trail.keyframe_insert(data_path="location", index=0, frame=float(MUSIC_START_OFFSET_FRAMES))
+
+        bounce_lengths = compute_bounce_lengths(blender_curve)
+        expected_pairs = max(0, len(json_curve_landings) - 1)
+        if expected_pairs == 0:
+            print(f"  WARNING: Curve '{curve_name}' contains fewer than two landings; no additional keyframes generated.")
+            continue
+        if not bounce_lengths:
+            print(f"  WARNING: No bounce segments found for '{curve_name}'; skipping.")
+            continue
+        if len(bounce_lengths) < expected_pairs:
+            print(
+                f"  WARNING: Curve '{curve_name}' had {len(bounce_lengths)} measured bounces but {expected_pairs} "
+                "landing intervals; will use available segments only."
+            )
+        pair_count = min(expected_pairs, len(bounce_lengths))
+
+        prev_x = landing_x
+        for idx in range(pair_count):
+            next_landing = json_curve_landings[idx + 1]
+            segment_length = bounce_lengths[idx]
+            next_x = prev_x + segment_length
+            landing_frame = float(MUSIC_START_OFFSET_FRAMES) + float(next_landing.get('timestamp', 0.0)) * GLOBAL_FPS
+            trail.location.x = next_x
+            trail.keyframe_insert(data_path="location", index=0, frame=landing_frame)
+            prev_x = next_x
 
 if __name__ == "__main__":
     main()
