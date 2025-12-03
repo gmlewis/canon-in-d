@@ -212,7 +212,9 @@ def main():
         json_curve_landings = []
         for raw_point in json_curve_points:
             normalized = normalize_curve_point(raw_point)
-            if normalized and normalized.get('type') == 'landing':
+            if not isinstance(normalized, dict):
+                continue
+            if normalized.get('type') == 'landing':
                 json_curve_landings.append(normalized)
         if not json_curve_landings:
             print(f"No landing points found in '{curve_name}' in JSON.")
