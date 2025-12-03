@@ -94,7 +94,7 @@ def compute_bounce_lengths(curve_obj) -> list[float]:
 
 
 def landing_timestamp(landing_point):
-    if isinstance(landing_point, dict):
+    if hasattr(landing_point, 'get'):
         return float(landing_point.get('timestamp', 0.0))
     if isinstance(landing_point, (list, tuple)):
         for element in landing_point:
