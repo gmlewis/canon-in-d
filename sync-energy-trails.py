@@ -270,6 +270,9 @@ def main():
         if not bounce_lengths:
             print(f"  WARNING: No bounce segments found for '{curve_name}'; skipping.")
             continue
+        print(f"  Debug: computed {len(bounce_lengths)} bounce lengths for '{curve_name}'.")
+        for i, length in enumerate(bounce_lengths):
+            print(f"    Segment {i}: length={length:.6f}")
         if len(bounce_lengths) < expected_pairs:
             print(
                 f"  WARNING: Curve '{curve_name}' had {len(bounce_lengths)} measured bounces but {expected_pairs} "
@@ -282,7 +285,12 @@ def main():
             next_landing = json_curve_landings[idx + 1]
             segment_length = bounce_lengths[idx]
             next_x = prev_x + segment_length
-            landing_frame = float(MUSIC_START_OFFSET_FRAMES) + landing_timestamp(next_landing) * GLOBAL_FPS
+            timestamp_value = landing_timestamp(next_landing)
+            landing_frame = float(MUSIC_START_OFFSET_FRAMES) + timestamp_value * GLOBAL_FPS
+            print(
+                f"    Segment {idx}: length={segment_length:.6f}, timestamp={timestamp_value:.6f}, "
+                f"frame={landing_frame:.6f}, x={next_x:.6f}"
+            )
             trail.location.x = next_x
             trail.keyframe_insert(data_path="location", index=0, frame=landing_frame)
             prev_x = next_x
