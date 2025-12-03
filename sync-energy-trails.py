@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Blender 5.0 script to sync the "Camera Controller" empty node from pre-generated data.
+Blender 5.0 script to sync the "Energy Trail" curves from pre-generated data.
 Run this script from within Blender's scripting environment.
 
 This script:
-1. Reads the JSON data file and creates animation keyframes for the "Camera Controller".
+1. Reads the JSON data file and creates animation keyframes for the "Energy Trails".
 """
 
 import bpy
@@ -20,6 +20,8 @@ JSON_FILE_PATH = "note-jumping-curves.json"
 
 GLOBAL_FPS = 60
 MUSIC_START_OFFSET_FRAMES = 120  # Frame at which music starts (2 seconds at 60 FPS)
+INITIAL_ENERGY_TRAIL_X_OFFSET = -5.0
+FIRST_LANDING_POINT_ENERGY_TRAIL_X_OFFSET_AT_T0 = 3.152
 
 def load_json_data(filepath):
     """Load and parse JSON file. Returns None on failure."""
@@ -36,7 +38,7 @@ def load_json_data(filepath):
 
 
 def load_json_data_file(filepath):
-    """Load the canonical JSON structure."""
+    """Load the JSON structure."""
     data = load_json_data(filepath)
     if data is None:
         return None
@@ -48,7 +50,7 @@ def load_json_data_file(filepath):
 
 def main():
     print("=" * 70)
-    print("Sync Camera Controller (Blender Script)")
+    print("Sync Energy Trails (Blender Script)")
     print("=" * 70)
 
     print(f"\nLoading JSON data from '{JSON_FILE_PATH}'...")
@@ -57,29 +59,37 @@ def main():
         print("Aborting due to JSON load failure.")
         return 1
 
-    curve1_points = json_data.get('curves', {}).get('curve1', {}).get('points', [])
-    if not curve1_points:
-        print("No data found for 'curves.curve1.points' in JSON.")
+    # curve1_points = json_data.get('curves', {}).get('curve1', {}).get('points', [])
+    # if not curve1_points:
+    #     print("No data found for 'curves.curve1.points' in JSON.")
+    #     return 1
+
+    # curve1_landings = [pt for pt in curve1_points if pt.get('type') == 'landing']
+    # if not curve1_landings:
+    #     print("No landing points found in 'curve1'.")
+    #     return 1
+
+    # print(f"  Found {len(curve1_landings)} landings for curve1.")
+
+    all_trails_collection = bpy.data.collections.get('Energy Trails')
+    if all_trails_collection is None:
+        print("ERROR: 'Energy Trails' collection not found in Blender file.", file=sys.stderr)
         return 1
 
-    curve1_landings = [pt for pt in curve1_points if pt.get('type') == 'landing']
-    if not curve1_landings:
-        print("No landing points found in 'curve1'.")
-        return 1
-
-    print(f"  Found {len(curve1_landings)} landings for curve1.")
-
-    scene = bpy.data.collections.get('Scene')
-    if scene is None:
-        print("ERROR: 'Scene' collection not found in Blender file.", file=sys.stderr)
-        return 1
-
-    camera_controller = scene.objects['Camera Controller']
+    camera_controller = all_trails_collection.objects['Energy Trails']
     if camera_controller is None:
-        print("ERROR: 'Camera Controller' object not found in Blender file.", file=sys.stderr)
+        print("ERROR: 'Energy Trails' object not found in Blender file.", file=sys.stderr)
         return 1
 
-    # First, clear existing keyframes on the Camera Controller's X location
+    for trail in all_trails_collection.objects:
+        if trail is None:
+            print("ERROR: An Energy Trail object not found in Blender file.", file=sys.stderr)
+            return 1
+
+        name = trail.name
+        print(f"\nProcessing Energy Trail: '{name}'")
+
+    # First, clear existing keyframes on the Energy Trails's X location
     camera_controller.animation_data_clear()
 
     # Now, for every landing, create an X-value keyframe at time + MUSIC_START_OFFSET_FRAMES
