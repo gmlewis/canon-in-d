@@ -117,12 +117,17 @@ def normalize_curve_point(point):
 
 def read_first_two_x_keyframes(obj):
     anim_data = obj.animation_data
+    print(f"  Debug: animation_data={anim_data}")
     if anim_data is None or anim_data.action is None:
+        print("  Debug: no animation_data or action")
         return None
     action = anim_data.action
+    print(f"  Debug: action={action}, has_fcurves={hasattr(action,'fcurves')}")
     if not hasattr(action, 'fcurves'):
+        print("  Debug: action missing fcurves")
         return None
     for fcurve in action.fcurves:
+        print(f"  Debug: fcurve {fcurve.data_path}[{fcurve.array_index}] has {len(fcurve.keyframe_points)} keypoints")
         if fcurve.data_path == 'location' and fcurve.array_index == 0:
             keypoints = sorted(fcurve.keyframe_points, key=lambda kp: kp.co.x)
             if len(keypoints) >= 2:
@@ -233,25 +238,25 @@ def main():
             return 1
 
         first_two = read_first_two_x_keyframes(trail)
+        initial_x = INITIAL_ENERGY_TRAIL_X_OFFSET
+        landing_x = FIRST_LANDING_POINT_ENERGY_TRAIL_X_OFFSET_AT_T0
         if first_two is None:
-            print(f"  WARNING: Unable to find at least two X keyframes for '{trail_name}'. skipping.")
-            continue
-
-        first_kf, second_kf = first_two
-        if abs(first_kf.co.x - 1.0) > FRAME_TOLERANCE:
-            print(
-                f"  WARNING: First keyframe for '{trail_name}' is at frame {first_kf.co.x:.6f} (expected 1); skipping."
-            )
-            continue
-        if abs(second_kf.co.x - MUSIC_START_OFFSET_FRAMES) > FRAME_TOLERANCE:
-            print(
-                f"  WARNING: Second keyframe for '{trail_name}' is at frame {second_kf.co.x:.6f} "
-                f"(expected {MUSIC_START_OFFSET_FRAMES}); skipping."
-            )
-            continue
-
-        initial_x = first_kf.co.y
-        landing_x = second_kf.co.y
+            print(f"  WARNING: Unable to find at least two X keyframes for '{trail_name}'; using fallback offsets.")
+        else:
+            first_kf, second_kf = first_two
+            if abs(first_kf.co.x - 1.0) > FRAME_TOLERANCE:
+                print(
+                    f"  WARNING: First keyframe for '{trail_name}' is at frame {first_kf.co.x:.6f} (expected 1); ignoring it."
+                )
+            else:
+                initial_x = first_kf.co.y
+            if abs(second_kf.co.x - MUSIC_START_OFFSET_FRAMES) > FRAME_TOLERANCE:
+                print(
+                    f"  WARNING: Second keyframe for '{trail_name}' is at frame {second_kf.co.x:.6f} "
+                    f"(expected {MUSIC_START_OFFSET_FRAMES}); ignoring it."
+                )
+            else:
+                landing_x = second_kf.co.y
         print(f"  Using initial trail X {initial_x:.6f} and first landing X {landing_x:.6f} for '{trail_name}'.")
 
         clear_x_keyframes(trail)
