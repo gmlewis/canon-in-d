@@ -1,3 +1,25 @@
+# Repository Instructions for GitHub Copilot
+
+## 🚨 CRITICAL: DO NOT USE `run_in_terminal` 🚨
+
+The `run_in_terminal` tool is **BROKEN** in this environment and causes the agent to hang indefinitely.
+
+**YOU MUST ALWAYS USE `create_and_run_task` INSTEAD.**
+
+### Rules for Command Execution:
+1.  **NEVER** use `run_in_terminal`.
+2.  **ALWAYS** use `create_and_run_task` for ALL shell commands, including:
+    *   Running tests (e.g., `./test-all.sh`, `pnpm test`)
+    *   Listing files (e.g., `ls -F`)
+    *   Checking file contents (if `read_file` is not suitable)
+    *   Building the project
+    *   Any other shell interaction.
+
+### Preferred Tools:
+*   Use `list_dir` to list files in a directory.
+*   Use `read_file` to read file contents.
+*   Use `create_and_run_task` for everything else that requires execution.
+
 # Copilot LLM Agent Rules and information for this repo
 
 1. **CRITICAL**: Never use any `git` commands except for the following:
