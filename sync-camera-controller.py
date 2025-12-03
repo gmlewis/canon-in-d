@@ -79,6 +79,18 @@ def main():
         print("ERROR: 'Camera Controller' object not found in Blender file.", file=sys.stderr)
         return 1
 
+    # First, clear existing keyframes on the Camera Controller's X location
+    camera_controller.animation_data_clear()
+
+    # Now, for every landing, create an X-value keyframe at time + MUSIC_START_OFFSET_FRAMES
+    # Make sure the keyframes use fractional frames and linear interpolation.
+    for landing in curve1_landings:
+        time_sec = landing.get('timestamp', 0.0)
+        x_value = landing.get('x', 0.0)
+        frame_num = MUSIC_START_OFFSET_FRAMES + (time_sec * GLOBAL_FPS)
+        camera_controller.location.x = x_value
+        camera_controller.keyframe_insert(data_path="location", index=0, frame=frame_num)
+        print(f"  Inserted keyframe at time {time_sec:.6f} frame {frame_num:.6f} with X={x_value:.6f}")
 
 if __name__ == "__main__":
     main()
