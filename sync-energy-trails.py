@@ -221,7 +221,8 @@ def main():
             return 1
         print(f"  Found {len(json_curve_landings)} landings for '{curve_name}'.")
 
-        blender_curve = curves_parent.children.get(f"{curve_name}_curve")
+        target_curve_name = f"{curve_name}_curve"
+        blender_curve = next((child for child in curves_parent.children if child.name == target_curve_name), None)
         if blender_curve is None:
             print(f"ERROR: Blender curve object '{curve_name}_curve' not found.", file=sys.stderr)
             return 1
