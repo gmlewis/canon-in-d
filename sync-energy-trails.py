@@ -59,26 +59,18 @@ def main():
         print("Aborting due to JSON load failure.")
         return 1
 
-    # curve1_points = json_data.get('curves', {}).get('curve1', {}).get('points', [])
-    # if not curve1_points:
-    #     print("No data found for 'curves.curve1.points' in JSON.")
-    #     return 1
-
-    # curve1_landings = [pt for pt in curve1_points if pt.get('type') == 'landing']
-    # if not curve1_landings:
-    #     print("No landing points found in 'curve1'.")
-    #     return 1
-
-    # print(f"  Found {len(curve1_landings)} landings for curve1.")
+    note_jumping_curves_collection = bpy.data.collections.get('Note Jumping Curves')
+    if note_jumping_curves_collection is None:
+        print("ERROR: 'Note Jumping Curves' collection not found in Blender file.", file=sys.stderr)
+        return 1
+    curves_parent = note_jumping_curves_collection.objects['Note Jumping Curves Parent']
+    if curves_parent is None:
+        print("ERROR: 'Note Jumping Curves Parent' object not found in Blender file.", file=sys.stderr)
+        return 1
 
     all_trails_collection = bpy.data.collections.get('Energy Trails')
     if all_trails_collection is None:
         print("ERROR: 'Energy Trails' collection not found in Blender file.", file=sys.stderr)
-        return 1
-
-    camera_controller = all_trails_collection.objects['Energy Trails']
-    if camera_controller is None:
-        print("ERROR: 'Energy Trails' object not found in Blender file.", file=sys.stderr)
         return 1
 
     for trail in all_trails_collection.objects:
@@ -86,21 +78,34 @@ def main():
             print("ERROR: An Energy Trail object not found in Blender file.", file=sys.stderr)
             return 1
 
-        name = trail.name
-        print(f"\nProcessing Energy Trail: '{name}'")
+        trail_name = trail.name
+        print(f"\nProcessing Energy Trail: '{trail_name}'")
+        curve_name = trail_name.replace("Energy Trail ", "curve")
+        json_curve_points = json_data.get('curves', {}).get(curve_name, {}).get('points', [])
+        if not json_curve_points:
+            print(f"  No data found for '{curve_name}' in JSON.")
+            return 1
+        json_curve_landings = [pt for pt in json_curve_points if pt.get('type') == 'landing']
+        if not json_curve_landings:
+            print(f"No landing points found in '{curve_name}' in JSON.")
+            return 1
+        print(f"  Found {len(json_curve_landings)} landings for '{curve_name}'.")
 
-    # First, clear existing keyframes on the Energy Trails's X location
-    camera_controller.animation_data_clear()
+        blender_curve = curves_parent.children.get(f"{curve_name}_curve")
+        if blender_curve is None:
+            print(f"ERROR: Blender curve object '{curve_name}_curve' not found.", file=sys.stderr)
+            return 1
 
-    # Now, for every landing, create an X-value keyframe at time + MUSIC_START_OFFSET_FRAMES
-    # Make sure the keyframes use fractional frames and linear interpolation.
-    for landing in curve1_landings:
-        time_sec = landing.get('timestamp', 0.0)
-        x_value = landing.get('x', 0.0)
-        frame_num = MUSIC_START_OFFSET_FRAMES + (time_sec * GLOBAL_FPS)
-        camera_controller.location.x = x_value
-        camera_controller.keyframe_insert(data_path="location", index=0, frame=frame_num)
-        print(f"  Inserted keyframe at time {time_sec:.6f} frame {frame_num:.6f} with X={x_value:.6f}")
+        # TODO: Read the first two animation keyframes for the X location of the trail.
+        # * If the first keyframe is not at frame 1, warn and skip.
+        # * If the first keyframe's X location is set, print this value and use it instead of INITIAL_ENERGY_TRAIL_X_OFFSET.
+        # * If the second keyframe is not at frame MUSIC_START_OFFSET_FRAMES, warn and skip.
+        # * If the second keyframe's X location is set, print this value and use it instead of FIRST_LANDING_POINT_ENERGY_TRAIL_X_OFFSET_AT_T0.
+        # * Clear all keyframes on the trail's X location.
+        # * Create the first two keyframes with the determined X locations, one on frame 1 and one on MUSIC_START_OFFSET_FRAMES.
+        # * Note that frame MUSIC_START_OFFSET_FRAMES corresponds to time 0 in the JSON data and note that this also represents the first landing for each curve and should be the first landing position from the JSON data.
+        # * Now, for every pair of landings, first ask Blender to measure the physical length of the curve between the first and second landing points.
+        # * Using this length, add this length to the previous keyframe's X location to get the new X location for the second landing point and make an animation keyframe for this curve's energy trail at the appropriate frame based on the timestamp of the second landing point (using fractional floating-point frames for accuracy).
 
 if __name__ == "__main__":
     main()
