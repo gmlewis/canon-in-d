@@ -1,8 +1,9 @@
+/.bitwig-project
 /.vscode
 /__pycache__
 /RenderEXR
-/.bitwig-project
 /auto-backups
+/docs
 *.blend*
 *.mkv
 *.mid

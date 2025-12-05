@@ -1,0 +1,86 @@
+================================================================================
+ANIMATED PROPERTIES REPORT - Blender 5.0
+================================================================================
+
+Object: Camera (Type: CAMERA)
+  Action: CameraAction
+  Slot: Camera
+----------------------------------------------------------------------
+  Property: rotation_euler[0]
+    Keyframes: 3
+    Frames: [1.0, 14680.0, 15086.0]
+
+Object: Camera Controller (Type: EMPTY)
+  Action: Camera ControllerAction.003
+  Slot: Camera Controller
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 802
+  Property: rotation_euler[2]
+    Keyframes: 4
+    Frames: [1.0, 120.0, 14876.0, 15086.0]
+  Property: scale[1]
+    Keyframes: 10
+    Frames: [1.0, 624.0, 696.0, 12955.0, 13398.0, 13560.0, 13638.0, 14126.0, 14278.0, 14876.0]
+
+Object: Energy Trail 1 (Type: CURVE)
+  Action: Energy Trail 1Action
+  Slot: Energy Trail 1
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 803
+
+Object: Energy Trail 2 (Type: CURVE)
+  Action: Energy Trail 2Action
+  Slot: Energy Trail 2
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 720
+
+Object: Energy Trail 3 (Type: CURVE)
+  Action: Energy Trail 3Action
+  Slot: Energy Trail 3
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 720
+
+Object: Energy Trail 4 (Type: CURVE)
+  Action: Energy Trail 4Action
+  Slot: Energy Trail 4
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 720
+
+Object: Energy Trail 5 (Type: CURVE)
+  Action: Energy Trail 5Action
+  Slot: Energy Trail 5
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 720
+
+Object: Energy Trail 6 (Type: CURVE)
+  Action: Energy Trail 6Action
+  Slot: Energy Trail 6
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 720
+
+Object: Energy Trail 7 (Type: CURVE)
+  Action: Energy Trail 7Action
+  Slot: Energy Trail 7
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 720
+
+Object: Mesh Timing Controller (Type: MESH)
+  Action: Energy Trail 1Action.001
+  Slot: Energy Trail 1
+----------------------------------------------------------------------
+  Property: location[0]
+    Keyframes: 803
+
+================================================================================
+SUMMARY
+================================================================================
+Total animated properties: 12
+Total keyframes: 6745
