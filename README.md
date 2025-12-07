@@ -4,7 +4,7 @@ This is my second fully open-source animation project.
 The first is: https://github.com/gmlewis/dance-of-the-sugar-plum-fairy
 
 The full animation can be viewed on YouTube:
-TBD
+https://youtu.be/u9pERIKYNiU
 
 I used the following tools:
 
